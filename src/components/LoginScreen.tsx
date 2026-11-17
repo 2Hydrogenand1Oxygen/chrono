@@ -20,6 +20,7 @@ import {
 } from 'lucide-react'
 import { LiquidGlass } from './LiquidGlass'
 import { validateAuthenticEmail } from '../lib/emailValidation'
+import { supabaseUrl } from '../lib/supabase'
 
 type Mode = 'signin' | 'signup' | 'reset'
 
@@ -101,8 +102,7 @@ export function LoginScreen({
     setTesting(true)
     setTestResult(null)
     try {
-      const url = import.meta.env.VITE_SUPABASE_URL || (import.meta.env as any).NEXT_PUBLIC_SUPABASE_URL
-      const res = await fetch(`${url}/auth/v1/health`, { method: 'GET' })
+      const res = await fetch(`${supabaseUrl}/auth/v1/health`, { method: 'GET' })
       setTestResult(`Connection successful (Supabase returned HTTP ${res.status})`)
     } catch (err: any) {
       setTestResult(`Failed: ${err?.message || err}. An ad-blocker, browser extension, or firewall may be blocking supabase.co.`)

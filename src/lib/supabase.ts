@@ -14,14 +14,19 @@
 import { createClient } from '@supabase/supabase-js'
 import type { Database } from './database.types'
 
+const DEFAULT_SUPABASE_URL = 'https://nryaeqpfpogguqyzmyxp.supabase.co'
+const DEFAULT_SUPABASE_PUBLISHABLE_KEY = 'sb_publishable_DqAmG5fB2_Tp4-VpzLcp7Q_iBXaupY7'
+
 const rawUrl = (
   import.meta.env.VITE_SUPABASE_URL ||
-  (import.meta.env as Record<string, string | undefined>).NEXT_PUBLIC_SUPABASE_URL
+  (import.meta.env as Record<string, string | undefined>).NEXT_PUBLIC_SUPABASE_URL ||
+  DEFAULT_SUPABASE_URL
 )?.trim()
 
 const rawKey = (
   import.meta.env.VITE_SUPABASE_PUBLISHABLE_KEY ||
-  (import.meta.env as Record<string, string | undefined>).NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY
+  (import.meta.env as Record<string, string | undefined>).NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY ||
+  DEFAULT_SUPABASE_PUBLISHABLE_KEY
 )?.trim()
 
 export const isSupabaseConfigured = Boolean(
@@ -32,11 +37,11 @@ export const isSupabaseConfigured = Boolean(
   (rawUrl.startsWith('https://') || rawUrl.startsWith('http://'))
 )
 
-// Safe fallback URL/key so createClient does not throw at module load time
-const activeUrl = isSupabaseConfigured ? rawUrl! : 'https://placeholder.supabase.co'
-const activeKey = isSupabaseConfigured ? rawKey! : 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.e30.placeholder'
+// Export active URL & key for diagnostic and client tools
+export const supabaseUrl = isSupabaseConfigured ? rawUrl! : 'https://placeholder.supabase.co'
+export const supabaseKey = isSupabaseConfigured ? rawKey! : 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.e30.placeholder'
 
-export const supabase = createClient<Database>(activeUrl, activeKey, {
+export const supabase = createClient<Database>(supabaseUrl, supabaseKey, {
   auth: {
     persistSession: true,
     autoRefreshToken: true,
