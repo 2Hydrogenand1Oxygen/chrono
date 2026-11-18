@@ -16,10 +16,11 @@ export interface Database {
           start_time: string   // timestamptz ISO string
           end_time: string     // timestamptz ISO string
           duration: number     // seconds
-          tracking_type: 'stopwatch' | 'timer' | 'manual'
+          tracking_type: 'stopwatch' | 'timer' | 'manual' | 'focus' | 'break'
           category_id: string | null
           subcategory: string | null
           notes: string | null
+          parent_session_id?: string | null
           created_at: string
           updated_at: string
         }
@@ -30,10 +31,11 @@ export interface Database {
           start_time: string
           end_time: string
           duration: number
-          tracking_type: 'stopwatch' | 'timer' | 'manual'
+          tracking_type: 'stopwatch' | 'timer' | 'manual' | 'focus' | 'break'
           category_id?: string | null
           subcategory?: string | null
           notes?: string | null
+          parent_session_id?: string | null
           created_at?: string
           updated_at?: string
         }
@@ -44,10 +46,11 @@ export interface Database {
           start_time?: string
           end_time?: string
           duration?: number
-          tracking_type?: 'stopwatch' | 'timer' | 'manual'
+          tracking_type?: 'stopwatch' | 'timer' | 'manual' | 'focus' | 'break'
           category_id?: string | null
           subcategory?: string | null
           notes?: string | null
+          parent_session_id?: string | null
           created_at?: string
           updated_at?: string
         }
@@ -102,6 +105,8 @@ export interface Database {
           user_id: string
           theme: 'light' | 'dark'
           daily_goal_hours: number
+          day_start_hour?: number | null
+          week_start?: 'monday' | 'sunday' | null
           created_at: string
           updated_at: string
         }
@@ -109,6 +114,8 @@ export interface Database {
           user_id: string
           theme?: 'light' | 'dark'
           daily_goal_hours?: number
+          day_start_hour?: number | null
+          week_start?: 'monday' | 'sunday' | null
           created_at?: string
           updated_at?: string
         }
@@ -116,6 +123,8 @@ export interface Database {
           user_id?: string
           theme?: 'light' | 'dark'
           daily_goal_hours?: number
+          day_start_hour?: number | null
+          week_start?: 'monday' | 'sunday' | null
           created_at?: string
           updated_at?: string
         }
@@ -125,7 +134,7 @@ export interface Database {
     Views: Record<string, never>
     Functions: Record<string, never>
     Enums: {
-      tracking_type: 'stopwatch' | 'timer' | 'manual'
+      tracking_type: 'stopwatch' | 'timer' | 'manual' | 'focus' | 'break'
     }
     CompositeTypes: Record<string, never>
   }

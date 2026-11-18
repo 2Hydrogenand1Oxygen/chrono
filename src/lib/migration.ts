@@ -23,6 +23,8 @@ export type LocalData = {
   categories: AppCategory[]
   theme: 'light' | 'dark'
   goal: string
+  dayStartHour?: number
+  weekStartsOn?: 'monday' | 'sunday'
 }
 
 export type MigrationResult = {
@@ -60,6 +62,8 @@ export function readLocalData(): LocalData | null {
       categories,
       theme: parsed.theme ?? 'light',
       goal: String(parsed.goal ?? '4'),
+      dayStartHour: typeof parsed.dayStartHour === 'number' ? parsed.dayStartHour : 0,
+      weekStartsOn: parsed.weekStartsOn === 'sunday' ? 'sunday' : 'monday',
     }
   } catch {
     return null
@@ -122,6 +126,8 @@ export async function migrateLocalToCloud(data: LocalData): Promise<MigrationRes
     await upsertPreferences({
       theme: data.theme,
       dailyGoalHours: Math.max(1, Number(data.goal) || 4),
+      dayStartHour: data.dayStartHour ?? 0,
+      weekStartsOn: data.weekStartsOn ?? 'monday',
     })
   } catch (err) {
     result.errors.push(`Preferences: ${(err as Error).message}`)

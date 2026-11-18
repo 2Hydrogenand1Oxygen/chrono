@@ -2201,6 +2201,154 @@ button:disabled {
   border: 1px solid var(--glass-border-subtle);
 }
 
+.day:focus-visible,
+.day.active-day {
+  outline: none;
+  border-color: var(--accent-primary);
+  box-shadow: 0 0 0 2px rgba(var(--accent-rgb), 0.35);
+  transform: scale(1.04);
+}
+
+/* Calendar Date Details Popup (Liquid Glass) */
+.calendar-date-popup,
+.lg-host.calendar-date-popup {
+  position: fixed !important;
+  z-index: 9999;
+  width: 260px;
+  max-width: calc(100vw - 32px);
+  padding: 14px 16px;
+  border-radius: var(--radius-lg);
+  background: var(--surface-card);
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--shadow-xl), 0 8px 32px rgba(0, 0, 0, 0.18);
+  backdrop-filter: var(--blur-glass);
+  -webkit-backdrop-filter: var(--blur-glass);
+  pointer-events: none;
+  animation: calPopupFade 0.14s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  box-sizing: border-box;
+}
+
+.calendar-date-popup.interactive {
+  pointer-events: auto;
+}
+
+@keyframes calPopupFade {
+  from {
+    opacity: 0;
+    transform: translateY(4px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+.cal-popup-date {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--divider-line);
+  padding-bottom: 6px;
+}
+
+.cal-popup-stats {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.cal-popup-stats div {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+}
+
+.cal-popup-stats b {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.cal-popup-breakdown {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 2px;
+  padding-top: 6px;
+  border-top: 1px solid var(--divider-line);
+}
+
+.cal-popup-breakdown-title {
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.cal-popup-cat-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.cal-popup-cat-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.cal-popup-cat-header span.cat-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.cal-popup-cat-header i.cat-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.cal-popup-subs {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-left: 13px;
+  font-size: 10.5px;
+  color: var(--text-muted);
+}
+
+.cal-popup-sub-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.cal-popup-empty {
+  font-size: 11px;
+  color: var(--text-muted);
+  font-style: italic;
+  padding: 4px 0;
+}
+
+.calendar-popup-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 9990;
+  background: transparent;
+}
+
 /* --------------------------------------------------------------------------
    15. HISTORY PAGE
    -------------------------------------------------------------------------- */
@@ -3910,6 +4058,22 @@ button:disabled {
   user-select: none;
 }
 
+/* Immersive Mode Auto-Hiding Controls */
+.immersive-autohide {
+  transition: opacity 0.35s cubic-bezier(0.16, 1, 0.3, 1), visibility 0.35s cubic-bezier(0.16, 1, 0.3, 1);
+  will-change: opacity;
+}
+
+.immersive-overlay.controls-hidden {
+  cursor: none;
+}
+
+.immersive-overlay.controls-hidden .immersive-autohide {
+  opacity: 0 !important;
+  pointer-events: none !important;
+  visibility: hidden;
+}
+
 .immersive-overlay::before {
   content: "";
   position: absolute;
@@ -4269,5 +4433,239 @@ button:disabled {
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
   }
+}
+
+/* ==========================================================================
+   21. FOCUS SESSION STYLES
+   ========================================================================== */
+.focus-setup-panel {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+  width: 100%;
+  max-width: 520px;
+  margin: 18px auto 0;
+  animation: fadeIn 0.3s ease;
+}
+
+.focus-presets-bar {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 6px;
+  padding: 4px;
+  background: var(--btn-glass-bg);
+  border: 1px solid var(--btn-glass-border);
+  border-radius: var(--radius-pill);
+  box-shadow: var(--btn-glass-shadow);
+  backdrop-filter: var(--blur-glass);
+  -webkit-backdrop-filter: var(--blur-glass);
+}
+
+.focus-presets-bar button {
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--btn-glass-text-secondary);
+  border-radius: var(--radius-pill);
+  padding: 6px 14px;
+  font-size: 11px;
+  font-weight: 600;
+  transition: all var(--transition-normal);
+}
+
+.focus-presets-bar button:hover:not(.chosen) {
+  color: var(--btn-glass-text);
+  background: var(--btn-glass-hover);
+}
+
+.focus-presets-bar button.chosen {
+  background: var(--btn-glass-active);
+  border-color: var(--btn-glass-border-active);
+  color: var(--btn-glass-text);
+  box-shadow: var(--btn-glass-shadow-hover), 0 0 12px var(--btn-glass-glow);
+}
+
+.focus-config-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+  width: 100%;
+}
+
+@media (max-width: 580px) {
+  .focus-config-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+
+.focus-config-item {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 8px 12px;
+  background: var(--surface-glass);
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-glass);
+  backdrop-filter: var(--blur-glass);
+  -webkit-backdrop-filter: var(--blur-glass);
+  text-align: left;
+}
+
+.focus-config-item span.config-label {
+  font-size: 10px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.focus-config-input-wrap {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.focus-config-input-wrap input {
+  width: 100%;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: 6px;
+  border: 1px solid var(--glass-border);
+  background: var(--input-bg, rgba(255, 255, 255, 0.06));
+  color: var(--text-primary);
+  font-family: var(--font-inter);
+  font-size: 13px;
+  font-weight: 600;
+  outline: none;
+}
+
+.focus-config-input-wrap input:focus {
+  border-color: var(--accent-primary);
+}
+
+.focus-config-input-wrap span.config-unit {
+  font-size: 11px;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.focus-options-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  width: 100%;
+  flex-wrap: wrap;
+  padding: 0 4px;
+}
+
+.focus-toggle-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+}
+
+.focus-toggle-label input[type="checkbox"] {
+  cursor: pointer;
+  accent-color: var(--accent-primary);
+}
+
+.focus-estimate-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  border-radius: var(--radius-pill);
+  background: var(--surface-glass);
+  border: 1px solid var(--glass-border);
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.focus-estimate-bar b {
+  color: var(--accent-primary);
+  font-weight: 600;
+}
+
+.focus-phase-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 14px;
+  border-radius: var(--radius-pill);
+  background: var(--btn-glass-bg);
+  border: 1px solid var(--btn-glass-border);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  color: var(--accent-primary);
+  box-shadow: var(--shadow-sm);
+  margin-top: 4px;
+  margin-bottom: 8px;
+}
+
+.focus-phase-badge.phase-break {
+  color: #34D399;
+  border-color: rgba(52, 211, 153, 0.3);
+  box-shadow: 0 0 12px rgba(52, 211, 153, 0.15);
+}
+
+.focus-completion-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  padding: 20px 24px;
+  margin: 18px auto 0;
+  width: 100%;
+  max-width: 480px;
+  border-radius: var(--radius-lg);
+  background: var(--surface-glass);
+  border: 1px solid var(--glass-border);
+  box-shadow: var(--shadow-glass);
+  backdrop-filter: var(--blur-glass);
+  -webkit-backdrop-filter: var(--blur-glass);
+  text-align: center;
+  animation: fadeIn 0.3s ease;
+}
+
+.focus-completion-title {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.2em;
+  color: var(--accent-primary);
+}
+
+.focus-completion-stats {
+  display: flex;
+  justify-content: space-around;
+  width: 100%;
+  gap: 16px;
+  margin: 6px 0;
+}
+
+.focus-stat-block {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.focus-stat-block span {
+  font-size: 10px;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.focus-stat-block b {
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--text-primary);
 }
 

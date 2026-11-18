@@ -295,8 +295,10 @@ function computeDisplacementData(opts: DisplacementOptions) {
       const d = sdRoundedBox(px, py, halfW, halfH, r);
 
       if (d > 0) {
-        data[i] = data[i + 1] = data[i + 2] = 128;
-        data[i + 3] = 0;
+        data[i] = 128;
+        data[i + 1] = 128;
+        data[i + 2] = 0;
+        data[i + 3] = 255;
         continue;
       }
 
@@ -370,13 +372,8 @@ function buildFilterSvg({
   aberration,
   frost,
 }: FilterSvgOptions): string {
-  const pad = Math.ceil(scale + aberration + 4);
-  const px = (pad / Math.max(1, width)) * 100;
-  const py = (pad / Math.max(1, height)) * 100;
-  const region = `x="-${px.toFixed(3)}%" y="-${py.toFixed(3)}%" width="${(100 + 2 * px).toFixed(3)}%" height="${(100 + 2 * py).toFixed(3)}%"`;
-
-  // Pixel-sized map matched to the lens; % units wash out the rim bend.
-  const map = `<feImage href="${mapUrl}" xlink:href="${mapUrl}" x="0" y="0" width="${width}" height="${height}" result="map" preserveAspectRatio="none"/>`;
+  const region = `x="0%" y="0%" width="100%" height="100%"`;
+  const map = `<feImage href="${mapUrl}" xlink:href="${mapUrl}" x="0" y="0" width="100%" height="100%" result="map" preserveAspectRatio="none"/>`;
   const displace = (s: number, result: string) =>
     `<feDisplacementMap in="SourceGraphic" in2="map" scale="${s}" xChannelSelector="R" yChannelSelector="G" result="${result}"/>`;
 

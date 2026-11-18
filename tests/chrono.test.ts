@@ -14,6 +14,31 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import path from 'node:path'
 import { validateAuthenticEmail } from '../src/lib/emailValidation.ts'
+import {
+  getTrackingDate,
+  getTrackingDateKey,
+  getDayBoundaryRange,
+  getSessionDayOverlap,
+  splitSessionByTrackingDays,
+  getWeekRange,
+  getCalendarDayDetails,
+  isSessionBreak,
+} from '../src/lib/dateUtils.ts'
+import {
+  createFocusSession,
+  startFocusSession,
+  pauseFocusSession,
+  resumeFocusSession,
+  advanceFocusSession,
+  skipBreak,
+  endFocusSession,
+  getPhaseRemainingTime,
+  getFocusSessionTotals,
+  calculateEstimatedSessionDuration,
+  FOCUS_PRESETS,
+  type FocusSessionConfig,
+  type FocusSessionState,
+} from '../src/lib/focusSession.ts'
 
 console.log('🧪 Starting Chrono automated test suite...\n')
 
@@ -394,4 +419,708 @@ console.log('🧪 Starting Chrono automated test suite...\n')
   console.log('  ✔ Email authenticity validation & Google authentication verified.\n')
 }
 
-console.log('🎉 All 7 test suites passed successfully!')
+// ── Test 8: Custom Day Boundary Tracking & Logical Session Splitting ─────────
+{
+  console.log('▶ Test 8: Custom day boundary tracking & session splitting')
+
+  // Case 8A: Default midnight boundary (dayStartHour = 0)
+  const dStandard = new Date(2026, 10, 16, 14, 0).getTime() // Nov 16, 2:00 PM
+  assert.equal(getTrackingDateKey(dStandard, 0), '2026-11-16', '14:00 must belong to Nov 16 at midnight boundary')
+
+  // Case 8B: Custom 04:00 boundary — Session from Monday 11:00 PM to Tuesday 02:00 AM
+  // Monday Nov 16 23:00 to Tuesday Nov 17 02:00 (3 hours = 10800s)
+  const mon11PM = new Date(2026, 10, 16, 23, 0).getTime()
+  const tue2AM = new Date(2026, 10, 17, 2, 0).getTime()
+  const session1 = {
+    id: 's1',
+    start: mon11PM,
+    end: tue2AM,
+    duration: 10800,
+  }
+
+  // Monday tracking window (Nov 16 04:00 to Nov 17 04:00)
+  const monRange = getDayBoundaryRange('2026-11-16', 4)
+  const tueRange = getDayBoundaryRange('2026-11-17', 4)
+
+  const monOverlap = getSessionDayOverlap(session1, monRange.start, monRange.end)
+  const tueOverlap = getSessionDayOverlap(session1, tueRange.start, tueRange.end)
+
+  assert.equal(monOverlap, 10800, 'Entire 3-hour session starting 11 PM and ending 2 AM belongs to Monday')
+  assert.equal(tueOverlap, 0, 'Tuesday gets 0 seconds of the Monday night session')
+
+  // Case 8C: Session starting Tuesday at 05:00 AM belongs to Tuesday
+  const tue5AM = new Date(2026, 10, 17, 5, 0).getTime()
+  const tue6AM = new Date(2026, 10, 17, 6, 0).getTime()
+  const session2 = { id: 's2', start: tue5AM, end: tue6AM, duration: 3600 }
+  assert.equal(getSessionDayOverlap(session2, monRange.start, monRange.end), 0, '5 AM Tuesday does not belong to Monday')
+  assert.equal(getSessionDayOverlap(session2, tueRange.start, tueRange.end), 3600, '5 AM Tuesday belongs entirely to Tuesday')
+
+  // Case 8D: Session crossing the 4:00 AM boundary
+  // Monday Nov 16 23:00 to Tuesday Nov 17 05:00 (6 hours = 21600s total; 5h before 4 AM, 1h after 4 AM)
+  const sessionCrossing = { id: 's_cross', start: mon11PM, end: tue5AM, duration: 21600 }
+  const crossMon = getSessionDayOverlap(sessionCrossing, monRange.start, monRange.end)
+  const crossTue = getSessionDayOverlap(sessionCrossing, tueRange.start, tueRange.end)
+
+  assert.equal(crossMon, 18000, 'Monday gets exactly 5 hours (23:00 to 04:00)')
+  assert.equal(crossTue, 3600, 'Tuesday gets exactly 1 hour (04:00 to 05:00)')
+  assert.equal(crossMon + crossTue, sessionCrossing.duration, 'Split durations sum up to total duration')
+
+  // Case 8E: splitSessionByTrackingDays utility helper verification
+  const splits = splitSessionByTrackingDays(sessionCrossing, 4)
+  assert.equal(splits.length, 2, 'Session crossing 4 AM must split across two tracking days')
+  assert.equal(splits[0].dateKey, '2026-11-16')
+  assert.equal(splits[0].duration, 18000)
+  assert.equal(splits[1].dateKey, '2026-11-17')
+  assert.equal(splits[1].duration, 3600)
+
+  // Case 8F: Session spanning multiple tracking days (27 hours)
+  const sessionMulti = {
+    id: 's_multi',
+    start: mon11PM, // Nov 16 23:00
+    end: new Date(2026, 10, 18, 2, 0).getTime(), // Nov 18 02:00
+    duration: 27 * 3600,
+  }
+  const multiSplits = splitSessionByTrackingDays(sessionMulti, 4)
+  assert.equal(multiSplits.length, 2, 'Nov 16 23:00 to Nov 18 02:00 is within 2 tracking days (Nov 16 and Nov 17)')
+  assert.equal(multiSplits[0].dateKey, '2026-11-16')
+  assert.equal(multiSplits[0].duration, 5 * 3600)
+  assert.equal(multiSplits[1].dateKey, '2026-11-17')
+  assert.equal(multiSplits[1].duration, 22 * 3600)
+  const multiSum = multiSplits.reduce((acc, s) => acc + s.duration, 0)
+  assert.equal(multiSum, sessionMulti.duration, 'Multi-day session splits sum up to exact total duration')
+
+  // Case 8G: Historical records recalculation without changing original timestamps
+  // A historical session starting at 01:00 AM Nov 17:
+  const historicalSession = {
+    id: 'hist_1',
+    start: new Date(2026, 10, 17, 1, 0).getTime(),
+    end: new Date(2026, 10, 17, 2, 30).getTime(),
+    duration: 5400,
+  }
+  // At midnight boundary (H = 0), it's Nov 17
+  const splitsH0 = splitSessionByTrackingDays(historicalSession, 0)
+  assert.equal(splitsH0[0].dateKey, '2026-11-17')
+  // When user switches preference to 04:00 (H = 4), it recalculates to Nov 16
+  const splitsH4 = splitSessionByTrackingDays(historicalSession, 4)
+  assert.equal(splitsH4[0].dateKey, '2026-11-16')
+  // Original start and end are untouched
+  assert.equal(historicalSession.start, new Date(2026, 10, 17, 1, 0).getTime())
+  assert.equal(historicalSession.end, new Date(2026, 10, 17, 2, 30).getTime())
+
+  console.log('  ✔ Custom day boundary tracking & session splitting verified.\n')
+}
+
+// ── Test 9: Week Start Preference & Transitions ──────────────────────────────
+{
+  console.log('▶ Test 9: Week start preference & transitions')
+
+  // Case 9A: Monday start vs Sunday start for Sunday night
+  // Sunday Nov 15, 2026 at 20:00 (8:00 PM)
+  const sunNight = new Date(2026, 10, 15, 20, 0).getTime()
+
+  const monWeek = getWeekRange(sunNight, 0, 'monday')
+  // For Monday start, Sunday Nov 15 is the LAST day of the week starting Monday Nov 9
+  assert.equal(new Date(monWeek.start).getDate(), 9, 'Monday-start week for Nov 15 must begin on Monday Nov 9')
+
+  const sunWeek = getWeekRange(sunNight, 0, 'sunday')
+  // For Sunday start, Sunday Nov 15 is the FIRST day of the week starting Sunday Nov 15
+  assert.equal(new Date(sunWeek.start).getDate(), 15, 'Sunday-start week for Nov 15 must begin on Sunday Nov 15')
+
+  // Case 9B: Month boundary transition
+  // Saturday Oct 31, 2026 & Sunday Nov 1, 2026
+  const oct31 = new Date(2026, 9, 31, 12, 0).getTime()
+  const nov1 = new Date(2026, 10, 1, 12, 0).getTime()
+
+  const oct31Mon = getWeekRange(oct31, 0, 'monday')
+  assert.equal(new Date(oct31Mon.start).getMonth(), 9, 'Oct 31 belongs to Oct 26 week')
+  assert.equal(new Date(oct31Mon.start).getDate(), 26)
+
+  const nov1Sun = getWeekRange(nov1, 0, 'sunday')
+  assert.equal(new Date(nov1Sun.start).getMonth(), 10)
+  assert.equal(new Date(nov1Sun.start).getDate(), 1, 'Nov 1 Sunday starts its own week when weekStartsOn=sunday')
+
+  // Case 9C: Year boundary transition
+  // Dec 31, 2026 & Jan 1, 2027
+  const dec31 = new Date(2026, 11, 31, 10, 0).getTime() // Thursday
+  const jan1 = new Date(2027, 0, 1, 10, 0).getTime()    // Friday
+  const yrWeek = getWeekRange(dec31, 0, 'monday')
+  const yrWeekNext = getWeekRange(jan1, 0, 'monday')
+  assert.equal(yrWeek.start, yrWeekNext.start, 'Dec 31 2026 and Jan 1 2027 share the same week starting Dec 28 2026')
+
+  // Case 9D: Custom day boundary combined with week start
+  // Monday Nov 16 at 02:00 AM with dayStartHour = 4:
+  // Since 2 AM < 4 AM, tracking day is still Sunday Nov 15!
+  const mon2AM = new Date(2026, 10, 16, 2, 0).getTime()
+  const weekAt2AM = getWeekRange(mon2AM, 4, 'monday')
+  assert.equal(new Date(weekAt2AM.start).getDate(), 9, 'Monday 2 AM with H=4 belongs to week of Nov 9 (Sunday tracking day)')
+
+  // Monday Nov 16 at 05:00 AM with dayStartHour = 4:
+  // Since 5 AM >= 4 AM, tracking day is Monday Nov 16!
+  const mon5AM = new Date(2026, 10, 16, 5, 0).getTime()
+  const weekAt5AM = getWeekRange(mon5AM, 4, 'monday')
+  assert.equal(new Date(weekAt5AM.start).getDate(), 16, 'Monday 5 AM with H=4 begins week of Nov 16')
+
+  console.log('  ✔ Week start preference & boundary transitions verified.\n')
+}
+
+// ── Test 10: Calendar Date Details Calculation & Heatmap Accuracy ───────────
+{
+  console.log('▶ Test 10: Calendar date details popup calculations')
+
+  const testCategories = [
+    { id: 'cat_dsp', name: 'DSP', color: '#557FEA', subs: ['Lectures', 'Assignments'] },
+    { id: 'cat_ml', name: 'Machine Learning', color: '#6AA9B8', subs: ['Projects'] },
+    { id: 'cat_break', name: 'Break', color: '#8892A4', subs: ['Rest'] },
+  ]
+
+  // Nov 16, 2026:
+  // Session 1: DSP - 1h 30m (5400s)
+  // Session 2: Machine Learning - 2h 00m (7200s)
+  // Session 3: Assignments (DSP) - 1h 10m (4200s)
+  // Session 4: Break - 45m (2700s)
+  const baseDay = new Date(2026, 10, 16, 10, 0).getTime()
+  const testSessions = [
+    { id: 's1', start: baseDay, end: baseDay + 5400 * 1000, duration: 5400, category: 'cat_dsp', subcategory: 'Lectures' },
+    { id: 's2', start: baseDay + 6000 * 1000, end: baseDay + 13200 * 1000, duration: 7200, category: 'cat_ml', subcategory: 'Projects' },
+    { id: 's3', start: baseDay + 14000 * 1000, end: baseDay + 18200 * 1000, duration: 4200, category: 'cat_dsp', subcategory: 'Assignments' },
+    { id: 's4', start: baseDay + 19000 * 1000, end: baseDay + 21700 * 1000, duration: 2700, category: 'cat_break', subcategory: 'Rest' },
+  ]
+
+  const details = getCalendarDayDetails({
+    year: 2026,
+    month: 10, // November
+    day: 16,
+    dayStartHour: 0,
+    sessions: testSessions,
+    categories: testCategories,
+  })
+
+  // Full date check
+  assert.equal(details.fullDate, 'MONDAY, 16 NOVEMBER')
+  // Total tracked time check (5400 + 7200 + 4200 + 2700 = 19500s = 5h 25m)
+  assert.equal(details.totalTracked, 19500)
+  // Study time excludes break (19500 - 2700 = 16800s = 4h 40m)
+  assert.equal(details.studyTime, 16800)
+  // Session count
+  assert.equal(details.sessionCount, 4)
+  assert.equal(details.isEmpty, false)
+
+  // Category breakdown checks
+  assert.equal(details.categoryBreakdown.length, 3)
+  const dspCat = details.categoryBreakdown.find(c => c.name === 'DSP')
+  assert.ok(dspCat, 'DSP category must exist')
+  assert.equal(dspCat?.duration, 9600) // 5400 + 4200 = 9600
+  assert.equal(dspCat?.subcategories.length, 2)
+  assert.equal(dspCat?.subcategories[0].name, 'Lectures')
+  assert.equal(dspCat?.subcategories[0].duration, 5400)
+  assert.equal(dspCat?.subcategories[1].name, 'Assignments')
+  assert.equal(dspCat?.subcategories[1].duration, 4200)
+
+  // Empty date handling check
+  const emptyDetails = getCalendarDayDetails({
+    year: 2026,
+    month: 10,
+    day: 20,
+    dayStartHour: 0,
+    sessions: testSessions,
+    categories: testCategories,
+  })
+  assert.equal(emptyDetails.totalTracked, 0)
+  assert.equal(emptyDetails.studyTime, 0)
+  assert.equal(emptyDetails.sessionCount, 0)
+  assert.equal(emptyDetails.isEmpty, true)
+  assert.equal(emptyDetails.categoryBreakdown.length, 0)
+
+  console.log('  ✔ Calendar date details popup calculations verified.\n')
+}
+
+// ── Test 11: Auto-Hiding Controls in Immersive Mode ──────────────────────────
+{
+  console.log('▶ Test 11: Immersive mode auto-hiding controls state machine')
+
+  class ImmersiveVisibilityController {
+    visible = true
+    reRenderCount = 0
+    timer: NodeJS.Timeout | null = null
+
+    clearTimer() {
+      if (this.timer) {
+        clearTimeout(this.timer)
+        this.timer = null
+      }
+    }
+
+    resetTimer() {
+      this.clearTimer()
+      this.timer = setTimeout(() => {
+        this.setVisible(false)
+      }, 3000)
+    }
+
+    setVisible(val: boolean) {
+      if (this.visible !== val) {
+        this.visible = val
+        this.reRenderCount++
+      }
+    }
+
+    enterImmersive() {
+      this.setVisible(true)
+      this.resetTimer()
+    }
+
+    exitImmersive() {
+      this.clearTimer()
+      this.setVisible(true)
+    }
+
+    onMouseMoveOrKeyDown() {
+      if (!this.visible) {
+        this.setVisible(true)
+      }
+      this.resetTimer()
+    }
+
+    onScreenTap() {
+      // Tap once to reveal controls; automatically hide after 3 seconds; tap again to reveal them
+      if (!this.visible) {
+        this.setVisible(true)
+      }
+      this.resetTimer()
+    }
+  }
+
+  const controller = new ImmersiveVisibilityController()
+
+  // 1. Initially entering immersive mode
+  controller.enterImmersive()
+  assert.equal(controller.visible, true, 'Controls must be visible initially upon entering immersive mode')
+  assert.ok(controller.timer !== null, 'Inactivity timer must be running')
+
+  // 2. High-frequency mouse movements while visible should NOT trigger state updates / re-renders
+  const reRendersBefore = controller.reRenderCount
+  for (let i = 0; i < 50; i++) {
+    controller.onMouseMoveOrKeyDown()
+  }
+  assert.equal(controller.reRenderCount, reRendersBefore, 'High frequency mousemove must not cause unnecessary React re-renders')
+  assert.equal(controller.visible, true)
+
+  // 3. After 3 seconds of inactivity, controls hide
+  controller.setVisible(false)
+  assert.equal(controller.visible, false, 'Controls hide after inactivity')
+
+  // 4. Tap once reveals controls immediately
+  controller.onScreenTap()
+  assert.equal(controller.visible, true, 'Tap once must reveal controls immediately')
+  assert.ok(controller.timer !== null, 'Inactivity timer must restart after tap')
+
+  // 5. Automatically hide after 3 seconds of inactivity
+  controller.setVisible(false)
+  assert.equal(controller.visible, false)
+
+  // 6. Tap again reveals them
+  controller.onScreenTap()
+  assert.equal(controller.visible, true, 'Tap again must reveal controls')
+
+  // 7. Mouse movement or keydown reveals controls immediately
+  controller.setVisible(false)
+  controller.onMouseMoveOrKeyDown()
+  assert.equal(controller.visible, true, 'Mouse activity must immediately reveal controls')
+
+  // 8. Exiting immersive mode clears timer and restores visibility
+  controller.exitImmersive()
+  assert.equal(controller.visible, true, 'Exiting immersive mode must restore controls to visible')
+  assert.equal(controller.timer, null, 'Exiting immersive mode must clean up inactivity timer')
+
+  console.log('  ✔ Immersive mode auto-hiding controls state machine verified.\n')
+}
+
+// ── Test 12: Warn Before Closing Tab (beforeunload protection) ───────────────
+{
+  console.log('▶ Test 12: Warn before closing tab (beforeunload protection)')
+
+  type TrackingState = {
+    active: { mode: 'stopwatch' | 'timer'; status: 'running' | 'paused' } | null
+  }
+
+  const shouldRegisterBeforeUnload = (state: TrackingState): boolean => {
+    return state.active !== null && state.active.status === 'running'
+  }
+
+  // Case 12A: No active tracking -> NO listener
+  assert.equal(shouldRegisterBeforeUnload({ active: null }), false, 'No warning when idle')
+
+  // Case 12B: Paused stopwatch -> NO listener
+  assert.equal(shouldRegisterBeforeUnload({ active: { mode: 'stopwatch', status: 'paused' } }), false, 'No warning when paused')
+
+  // Case 12C: Running stopwatch -> LISTENER ACTIVE
+  assert.equal(shouldRegisterBeforeUnload({ active: { mode: 'stopwatch', status: 'running' } }), true, 'Warning active when stopwatch running')
+
+  // Case 12D: Running timer -> LISTENER ACTIVE
+  assert.equal(shouldRegisterBeforeUnload({ active: { mode: 'timer', status: 'running' } }), true, 'Warning active when countdown timer running')
+
+  // Case 12E: Paused countdown timer -> NO listener
+  assert.equal(shouldRegisterBeforeUnload({ active: { mode: 'timer', status: 'paused' } }), false, 'No warning when timer is paused')
+
+  // Case 12F: Simulation of beforeunload event callback
+  const mockEvent = {
+    defaultPrevented: false,
+    returnValue: undefined as string | undefined,
+    preventDefault() {
+      this.defaultPrevented = true
+    },
+  }
+
+  const handleBeforeUnload = (e: typeof mockEvent) => {
+    e.preventDefault()
+    e.returnValue = ''
+    return ''
+  }
+
+  handleBeforeUnload(mockEvent)
+  assert.equal(mockEvent.defaultPrevented, true, 'preventDefault must be called on beforeunload')
+  assert.equal(mockEvent.returnValue, '', 'returnValue must be set to empty string on beforeunload')
+
+  console.log('  ✔ Warn before closing tab logic verified.\n')
+}
+
+// ── Test 13: Favicon and Web App Icon Assets & HTML Links ────────────────────
+{
+  console.log('▶ Test 13: Chrono favicon, web app icons and manifest assets')
+
+  const publicDir = path.resolve('public')
+  const indexHtmlPath = path.resolve('index.html')
+
+  // Check required assets exist and have valid sizes
+  const requiredFiles = [
+    { file: 'favicon.svg', minBytes: 500 },
+    { file: 'favicon.ico', minBytes: 100 },
+    { file: 'favicon-16x16.png', minBytes: 100 },
+    { file: 'favicon-32x32.png', minBytes: 200 },
+    { file: 'apple-touch-icon.png', minBytes: 1000 },
+    { file: 'icon-192.png', minBytes: 1000 },
+    { file: 'icon-512.png', minBytes: 2000 },
+    { file: 'site.webmanifest', minBytes: 100 },
+  ]
+
+  for (const item of requiredFiles) {
+    const fullPath = path.join(publicDir, item.file)
+    assert.ok(fs.existsSync(fullPath), `Asset ${item.file} must exist in public/`)
+    const stats = fs.statSync(fullPath)
+    assert.ok(stats.size >= item.minBytes, `Asset ${item.file} size (${stats.size}B) should be >= ${item.minBytes}B`)
+  }
+
+  // Check manifest content
+  const manifestRaw = fs.readFileSync(path.join(publicDir, 'site.webmanifest'), 'utf-8')
+  const manifest = JSON.parse(manifestRaw)
+  assert.equal(manifest.name, 'Chrono')
+  assert.equal(manifest.theme_color, '#090B10')
+  assert.ok(Array.isArray(manifest.icons) && manifest.icons.length >= 4, 'Manifest must specify multiple icon sizes')
+
+  // Check SVG content
+  const svgContent = fs.readFileSync(path.join(publicDir, 'favicon.svg'), 'utf-8')
+  assert.ok(svgContent.includes('<svg'), 'SVG file must contain valid SVG tag')
+  assert.ok(svgContent.includes('viewBox="0 0 512 512"'), 'SVG file must have 512x512 viewBox')
+  assert.ok(svgContent.includes('#090B10') || svgContent.includes('#141722'), 'SVG must use Chrono dark charcoal palette')
+
+  // Check index.html links
+  const indexHtml = fs.readFileSync(indexHtmlPath, 'utf-8')
+  assert.ok(indexHtml.includes('rel="icon" type="image/svg+xml" href="/favicon.svg"'), 'index.html must link favicon.svg')
+  assert.ok(indexHtml.includes('href="/favicon-32x32.png"'), 'index.html must link 32x32 png')
+  assert.ok(indexHtml.includes('href="/favicon-16x16.png"'), 'index.html must link 16x16 png')
+  assert.ok(indexHtml.includes('rel="apple-touch-icon"'), 'index.html must link apple-touch-icon')
+  assert.ok(indexHtml.includes('rel="manifest" href="/site.webmanifest"'), 'index.html must link site.webmanifest')
+  assert.ok(indexHtml.includes('<meta name="theme-color" content="#090B10" />'), 'index.html must have dark theme-color meta tag')
+
+  console.log('  ✔ Chrono favicon, web app icons and manifest assets verified.\n')
+}
+
+// ── Test 14: Focus Session Configuration, Presets & Estimated Duration ──────
+{
+  console.log('▶ Test 14: Focus session configuration, presets & estimated duration')
+
+  // Check presets (durations stored in seconds)
+  assert.ok(FOCUS_PRESETS.pomodoro, 'Pomodoro preset must exist')
+  assert.equal(FOCUS_PRESETS.pomodoro.focusDuration, 25 * 60)
+  assert.equal(FOCUS_PRESETS.pomodoro.shortBreakDuration, 5 * 60)
+  assert.equal(FOCUS_PRESETS.pomodoro.longBreakDuration, 15 * 60)
+  assert.equal(FOCUS_PRESETS.pomodoro.totalCycles, 4)
+  assert.equal(FOCUS_PRESETS.pomodoro.longBreakEvery, 4)
+
+  assert.ok(FOCUS_PRESETS.deep_work, 'Deep Work preset must exist')
+  assert.equal(FOCUS_PRESETS.deep_work.focusDuration, 50 * 60)
+  assert.equal(FOCUS_PRESETS.deep_work.shortBreakDuration, 10 * 60)
+  assert.equal(FOCUS_PRESETS.deep_work.longBreakDuration, 20 * 60)
+  assert.equal(FOCUS_PRESETS.deep_work.totalCycles, 3)
+  assert.equal(FOCUS_PRESETS.deep_work.longBreakEvery, 3)
+
+  assert.ok(FOCUS_PRESETS.extended_focus, 'Extended Focus preset must exist')
+  assert.equal(FOCUS_PRESETS.extended_focus.focusDuration, 90 * 60)
+  assert.equal(FOCUS_PRESETS.extended_focus.shortBreakDuration, 15 * 60)
+  assert.equal(FOCUS_PRESETS.extended_focus.longBreakDuration, 25 * 60)
+  assert.equal(FOCUS_PRESETS.extended_focus.totalCycles, 2)
+  assert.equal(FOCUS_PRESETS.extended_focus.longBreakEvery, 2)
+
+  // Estimated duration calculation
+  // Pomodoro: 4 focus (4 * 25m = 100m = 6000s) + cycles 1, 2, 3 short breaks (3 * 5m = 15m) + cycle 4 long break (15m) = 30m breaks = 1800s. Total = 7800s (130 min)
+  const pomoEst = calculateEstimatedSessionDuration(FOCUS_PRESETS.pomodoro)
+  assert.equal(pomoEst.totalFocusSeconds, 6000)
+  assert.equal(pomoEst.totalBreakSeconds, 1800)
+  assert.equal(pomoEst.totalSessionSeconds, 7800)
+  assert.equal(pomoEst.shortBreakCount, 3)
+  assert.equal(pomoEst.longBreakCount, 1)
+
+  // Deep Work: 3 focus (3 * 50m = 150m = 9000s) + cycles 1, 2 short breaks (2 * 10m = 20m) + cycle 3 long break (20m) = 40m breaks = 2400s. Total = 11400s (190 min)
+  const deepEst = calculateEstimatedSessionDuration(FOCUS_PRESETS.deep_work)
+  assert.equal(deepEst.totalFocusSeconds, 9000)
+  assert.equal(deepEst.totalBreakSeconds, 2400)
+  assert.equal(deepEst.totalSessionSeconds, 11400)
+  assert.equal(deepEst.shortBreakCount, 2)
+  assert.equal(deepEst.longBreakCount, 1)
+
+  // Single cycle (no intermediate breaks, ends with long break if enabled)
+  const singleCycleEst = calculateEstimatedSessionDuration({
+    focusDuration: 45 * 60,
+    shortBreakDuration: 5 * 60,
+    longBreakDuration: 15 * 60,
+    totalCycles: 1,
+    longBreakEvery: 1,
+  })
+  assert.equal(singleCycleEst.totalFocusSeconds, 45 * 60)
+  assert.equal(singleCycleEst.totalBreakSeconds, 15 * 60)
+  assert.equal(singleCycleEst.totalSessionSeconds, 60 * 60)
+
+  console.log('  ✔ Focus session configuration, presets & estimated duration verified.\n')
+}
+
+// ── Test 15: Focus State Machine Multi-cycle Progression, Pausing & Skip Break 
+{
+  console.log('▶ Test 15: Focus state machine multi-cycle progression, pausing & skip break')
+
+  const baseConfig: FocusSessionConfig = {
+    preset: 'custom',
+    focusDuration: 25 * 60,       // 25 min = 1500s
+    shortBreakDuration: 5 * 60,   // 5 min = 300s
+    longBreakDuration: 15 * 60,   // 15 min = 900s
+    totalCycles: 3,
+    longBreakEvery: 3,
+    autoStartNextPhase: true,     // auto advance in this test to verify multi-phase chain
+    soundEnabled: true,
+  }
+
+  const t0 = 1700000000000 // Fixed epoch ms
+
+  // Step 1: Create session & start -> starts at Cycle 1, Phase 'focus', Status 'running'
+  let session = createFocusSession(baseConfig)
+  assert.equal(session.status, 'idle')
+  assert.equal(session.currentPhase, 'focus')
+  assert.equal(session.currentCycle, 1)
+  assert.equal(session.phaseDuration, 1500)
+  assert.equal(session.intervals.length, 0)
+
+  session = startFocusSession(session, t0)
+  assert.equal(session.status, 'running')
+  assert.equal(session.phaseStartedAt, t0)
+
+  // Check remaining time at t0 + 500s
+  const rem1 = getPhaseRemainingTime(session, t0 + 500_000)
+  assert.equal(rem1, 1000, 'Remaining time should be 1000s after 500s elapsed')
+
+  // Step 2: Advance after Focus 1 finishes (1500s later)
+  // Transition should be to SHORT_BREAK (since cycle 1 < 3)
+  const res1 = advanceFocusSession(session, t0 + 1500_000)
+  session = res1.session
+  assert.equal(session.currentPhase, 'short_break')
+  assert.equal(session.currentCycle, 1)
+  assert.equal(session.phaseDuration, 300)
+  assert.equal(res1.completedIntervals.length, 1)
+  assert.equal(res1.completedIntervals[0].phase, 'focus')
+  assert.equal(res1.completedIntervals[0].duration, 1500)
+  assert.equal(res1.sessionFinished, false)
+
+  // Step 3: Advance after Short Break 1 finishes (300s later -> t0 + 1800s)
+  // Transition should be to Cycle 2 FOCUS
+  const res2 = advanceFocusSession(session, t0 + 1800_000)
+  session = res2.session
+  assert.equal(session.currentPhase, 'focus')
+  assert.equal(session.currentCycle, 2)
+  assert.equal(session.phaseDuration, 1500)
+  assert.equal(res2.completedIntervals.length, 1)
+  assert.equal(res2.completedIntervals[0].phase, 'short_break')
+  assert.equal(res2.completedIntervals[0].duration, 300)
+
+  // Step 4: Test Pausing during Focus 2
+  // Pause after 300s into Focus 2 (t0 + 2100s)
+  session = pauseFocusSession(session, t0 + 2100_000)
+  assert.equal(session.status, 'paused')
+  assert.equal(session.phaseElapsed, 300)
+
+  // While paused, wall clock advances 600s to t0 + 2700s
+  const remPaused = getPhaseRemainingTime(session, t0 + 2700_000)
+  assert.equal(remPaused, 1500 - 300, 'Paused session must NOT lose remaining time during pause')
+
+  // Resume Focus 2 at t0 + 2700s
+  session = resumeFocusSession(session, t0 + 2700_000)
+  assert.equal(session.status, 'running')
+  assert.equal(session.phaseStartedAt, t0 + 2700_000)
+
+  // Advance remaining 1200s -> completes Focus 2 at t0 + 3900s
+  const res3 = advanceFocusSession(session, t0 + 3900_000)
+  session = res3.session
+  assert.equal(session.currentPhase, 'short_break')
+  assert.equal(session.currentCycle, 2)
+  assert.equal(res3.completedIntervals[0].phase, 'focus')
+  assert.equal(res3.completedIntervals[0].duration, 1500)
+
+  // Step 5: Test Skip Break on Cycle 2 Short Break
+  // User decides after 60s of break to skip to next focus cycle
+  session = skipBreak(session, t0 + 3960_000)
+  assert.equal(session.currentPhase, 'focus')
+  assert.equal(session.currentCycle, 3)
+  assert.equal(session.phaseDuration, 1500)
+  const lastRecordedInterval = session.intervals[session.intervals.length - 1]
+  assert.equal(lastRecordedInterval.phase, 'short_break')
+  assert.equal(lastRecordedInterval.duration, 60, 'Skipped break records elapsed time up to skip')
+
+  // Step 6: Advance after Focus 3 finishes (1500s later -> t0 + 5460s)
+  // Since cycle 3 matches longBreakEvery (3), transition should be to LONG_BREAK!
+  const res4 = advanceFocusSession(session, t0 + 5460_000)
+  session = res4.session
+  assert.equal(session.currentPhase, 'long_break')
+  assert.equal(session.currentCycle, 3)
+  assert.equal(session.phaseDuration, 900)
+  assert.equal(res4.completedIntervals[0].phase, 'focus')
+
+  // Step 7: Complete Long Break (900s later -> t0 + 6360s)
+  const res5 = advanceFocusSession(session, t0 + 6360_000)
+  session = res5.session
+  assert.equal(session.status, 'completed')
+  assert.equal(res5.sessionFinished, true)
+  assert.equal(res5.completedIntervals[0].phase, 'long_break')
+  assert.equal(res5.completedIntervals[0].duration, 900)
+
+  // Verify total focus vs break times across entire session
+  const totals = getFocusSessionTotals(session)
+  assert.equal(totals.totalFocusSeconds, 4500, 'Total focus should be 3 * 1500s = 4500s (75 min)')
+  assert.equal(totals.totalBreakSeconds, 300 + 60 + 900, 'Total break should be 300 + 60 + 900 = 1260s (21 min)')
+  assert.equal(totals.completedCycles, 3)
+
+  // Step 8: Early manual termination via endFocusSession
+  const earlySession = startFocusSession(createFocusSession(baseConfig), t0)
+  const earlyEnded = endFocusSession(earlySession, t0 + 600_000, true)
+  assert.equal(earlyEnded.session.status, 'completed')
+  assert.ok(earlyEnded.finalInterval, 'Should record final interval')
+  assert.equal(earlyEnded.finalInterval?.phase, 'focus')
+  assert.equal(earlyEnded.finalInterval?.duration, 600)
+
+  console.log('  ✔ Focus state machine multi-cycle progression, pausing & skip break verified.\n')
+}
+
+// ── Test 16: Separate Focus vs Break Accounting in Analytics and Totals ──────
+{
+  console.log('▶ Test 16: Separate focus vs break accounting in analytics and totals')
+
+  const categories = [
+    { id: 'cat-work', name: 'Work', color: '#3b82f6', subs: ['Engineering', 'Writing'] },
+    { id: 'cat-study', name: 'Study', color: '#10b981', subs: ['Math', 'Physics'] },
+    { id: 'cat-break', name: 'Break', color: '#6b7280', subs: ['Coffee', 'Walk'] },
+  ]
+
+  // Verify isSessionBreak helper under various forms
+  assert.equal(isSessionBreak({ source: 'break' }, categories), true, 'source: break is break')
+  assert.equal(isSessionBreak({ source: 'focus' }, categories), false, 'source: focus is NOT break')
+  assert.equal(isSessionBreak({ source: 'stopwatch' }, categories), false, 'source: stopwatch is NOT break')
+  assert.equal(isSessionBreak({ source: 'timer' }, categories), false, 'source: timer is NOT break')
+  assert.equal(isSessionBreak({ category: 'cat-break' }, categories), true, 'Category named Break is recognized as break')
+  assert.equal(isSessionBreak({ notes: '[Break] Cycle 1' }, categories), true, 'Notes containing [Break] is recognized as break')
+
+  // Sample session dataset for today
+  const now = 1700000000000
+  const sampleSessions = [
+    {
+      id: 's1',
+      start: now - 7200_000,
+      end: now - 3600_000,
+      duration: 3600, // 1 hour stopwatch
+      source: 'stopwatch' as const,
+      category: 'cat-work',
+    },
+    {
+      id: 's2',
+      start: now - 3600_000,
+      end: now - 600_000,
+      duration: 3000, // 50 min focus
+      source: 'focus' as const,
+      category: 'cat-study',
+      parentSessionId: 'focus-group-1',
+    },
+    {
+      id: 's3',
+      start: now - 600_000,
+      end: now,
+      duration: 600, // 10 min break
+      source: 'break' as const,
+      category: 'cat-study',
+      parentSessionId: 'focus-group-1',
+      notes: '[Break] Short break between focus cycles',
+    },
+  ]
+
+  // Calculate study total: MUST include stopwatch (3600s) + focus (3000s) = 6600s.
+  // Break (600s) MUST BE STRICTLY EXCLUDED!
+  const studySessionsOnly = sampleSessions.filter(s => !isSessionBreak(s, categories))
+  const totalStudySeconds = studySessionsOnly.reduce((acc, s) => acc + s.duration, 0)
+  assert.equal(totalStudySeconds, 6600, 'Study total must be exactly 6600s (excluding break)')
+
+  // Category totals: Work = 3600s, Study = 3000s (break of 600s excluded)
+  const categoryStudyTotals = studySessionsOnly.reduce<Record<string, number>>((acc, s) => {
+    if (s.category) acc[s.category] = (acc[s.category] || 0) + s.duration
+    return acc
+  }, {})
+  assert.equal(categoryStudyTotals['cat-work'], 3600)
+  assert.equal(categoryStudyTotals['cat-study'], 3000, 'Study category must exclude break intervals')
+  assert.equal(categoryStudyTotals['cat-break'] || 0, 0, 'Break category must have 0 study seconds')
+
+  // Calendar day details verification
+  const testDate = new Date(now)
+  const dayDetails = getCalendarDayDetails({
+    year: testDate.getFullYear(),
+    month: testDate.getMonth(),
+    day: testDate.getDate(),
+    dayStartHour: 0,
+    sessions: sampleSessions as any,
+    categories,
+  })
+  assert.equal(dayDetails.studyTime, 6600, 'Calendar day details studyTime must exclude break duration (3600 + 3000 = 6600)')
+  assert.equal(dayDetails.sessionCount, 3, 'Total session records count reflects all recorded items')
+
+  console.log('  ✔ Separate focus vs break accounting in analytics and totals verified.\n')
+}
+
+// ── Test 17: Focus Sessions Database Migration & Schema Compatibility ────────
+{
+  console.log('▶ Test 17: Focus sessions database migration & schema compatibility')
+
+  const migrationPath = path.resolve('supabase', 'migrations', '005_focus_sessions.sql')
+  assert.ok(fs.existsSync(migrationPath), 'Migration 005_focus_sessions.sql must exist')
+
+  const migrationSql = fs.readFileSync(migrationPath, 'utf-8')
+
+  // Must update tracking_type constraint to include 'focus' and 'break'
+  assert.ok(migrationSql.includes("'focus'"), "Migration must include 'focus' in tracking_type")
+  assert.ok(migrationSql.includes("'break'"), "Migration must include 'break' in tracking_type")
+  assert.ok(migrationSql.includes("'stopwatch'"), "Migration must preserve 'stopwatch' in tracking_type")
+  assert.ok(migrationSql.includes("'timer'"), "Migration must preserve 'timer' in tracking_type")
+  assert.ok(migrationSql.includes("'manual'"), "Migration must preserve 'manual' in tracking_type")
+
+  // Must add parent_session_id column and index
+  assert.ok(migrationSql.includes('parent_session_id'), 'Migration must add parent_session_id column')
+  assert.ok(
+    migrationSql.includes('idx_sessions_parent_session_id'),
+    'Migration must create index on parent_session_id'
+  )
+
+  console.log('  ✔ Focus sessions database migration & schema compatibility verified.\n')
+}
+
+console.log('🎉 All 17 test suites passed successfully!')

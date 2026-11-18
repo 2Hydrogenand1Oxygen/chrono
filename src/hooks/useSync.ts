@@ -93,6 +93,7 @@ export function useSync(
       const [cats] = await Promise.all([fetchCategories()])
       const id = await saveSession(session, cats)
       setStatus('synced')
+      setErrorMessage(null)
       setLastSynced(new Date())
       return id
     } catch (err) {

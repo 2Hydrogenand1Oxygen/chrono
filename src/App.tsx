@@ -1,10 +1,11 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import {
   ArrowUpRight, BarChart3, CalendarDays, Check, ChevronDown,
-  ChevronLeft, ChevronRight, Clock3, Cloud, CloudOff, Download, History,
+  ChevronLeft, ChevronRight, Clock3, Cloud, CloudOff, Download, FastForward, History,
   LogIn, LogOut, Maximize2, Menu, Minimize2, Moon, MoreHorizontal, PanelLeft,
   PanelLeftClose, PanelLeftOpen, Pause, Play, Plus, RotateCcw,
-  Settings, Sidebar, Sparkles, Sun, Timer, Trash2, Type, Upload, X
+  Settings, Sidebar, Sparkles, Sun, Target, Timer, Trash2, Type, Upload, X
 } from 'lucide-react'
 import { LiquidGlass } from './components/LiquidGlass'
 import { LoginScreen } from './components/LoginScreen'
@@ -14,6 +15,36 @@ import { useAuth } from './hooks/useAuth'
 import { useSync } from './hooks/useSync'
 import { hasMigratableData, readLocalData } from './lib/migration'
 import type { AppSession, AppCategory, AppPreferences } from './lib/db'
+import {
+  getTrackingDate,
+  getTrackingDateKey,
+  getDayBoundaryRange,
+  getSessionDayOverlap,
+  getWeekRange,
+  getCalendarDayDetails,
+  formatDurationHuman,
+  isSessionBreak,
+  type WeekStartPreference,
+} from './lib/dateUtils'
+import {
+  type FocusPreset,
+  type FocusPhase,
+  type FocusSessionStatus,
+  type FocusSessionConfig,
+  type FocusSessionState,
+  DEFAULT_FOCUS_CONFIG,
+  FOCUS_PRESETS,
+  createFocusSession,
+  startFocusSession,
+  pauseFocusSession,
+  resumeFocusSession,
+  skipBreak,
+  endFocusSession,
+  advanceFocusSession,
+  getPhaseRemainingTime,
+  calculateEstimatedSessionDuration,
+  getFocusSessionTotals,
+} from './lib/focusSession'
 
 export type AppFont = 'inter' | 'manrope' | 'space-grotesk' | 'jetbrains-mono'
 export type ClockFont = 'inter' | 'manrope' | 'space-grotesk' | 'jetbrains-mono'
@@ -21,7 +52,7 @@ export type ClockStyle = 'clean' | 'digital' | 'rounded'
 export type SidebarMode = 'expanded' | 'compact' | 'hidden'
 
 type Category = AppCategory & { id: string; name: string; color: string; subs: string[] }
-type Session = AppSession & { id: string; start: number; end: number; duration: number; category: string; subcategory: string; source: 'stopwatch' | 'timer' | 'manual'; notes?: string }
+type Session = AppSession & { id: string; start: number; end: number; duration: number; category: string; subcategory: string; source: 'stopwatch' | 'timer' | 'manual' | 'focus' | 'break'; notes?: string; parentSessionId?: string }
 type Active = { mode: 'stopwatch' | 'timer'; status: 'running' | 'paused'; startedAt: number | null; elapsed: number; duration: number; category: string; subcategory: string; notes?: string }
 type Page = 'clock' | 'analytics' | 'calendar' | 'history' | 'settings'
 
@@ -89,6 +120,10 @@ function readStore() {
         clockFont: (parsed.clockFont || 'inter') as ClockFont,
         clockStyle: (parsed.clockStyle || 'clean') as ClockStyle,
         sidebarMode: (parsed.sidebarMode || 'expanded') as SidebarMode,
+        dayStartHour: typeof parsed.dayStartHour === 'number' ? parsed.dayStartHour : 0,
+        weekStartsOn: (parsed.weekStartsOn === 'sunday' ? 'sunday' : 'monday') as WeekStartPreference,
+        activeFocus: (parsed.activeFocus ? advanceFocusSession(parsed.activeFocus, Date.now()).session : null) as FocusSessionState | null,
+        focusConfig: (parsed.focusConfig || DEFAULT_FOCUS_CONFIG) as FocusSessionConfig,
       }
     }
   } catch { /* ignore damaged local cache */ }
@@ -102,6 +137,10 @@ function readStore() {
     clockFont: 'inter' as ClockFont,
     clockStyle: 'clean' as ClockStyle,
     sidebarMode: 'expanded' as SidebarMode,
+    dayStartHour: 0,
+    weekStartsOn: 'monday' as WeekStartPreference,
+    activeFocus: null as FocusSessionState | null,
+    focusConfig: DEFAULT_FOCUS_CONFIG,
   }
 }
 
@@ -140,13 +179,20 @@ export default function App() {
   const [clockFont, setClockFont] = useState<ClockFont>(initial.clockFont ?? 'inter')
   const [clockStyle, setClockStyle] = useState<ClockStyle>(initial.clockStyle ?? 'clean')
   const [sidebarMode, setSidebarMode] = useState<SidebarMode>(initial.sidebarMode ?? 'expanded')
+  const [dayStartHour, setDayStartHour] = useState<number>(initial.dayStartHour ?? 0)
+  const [weekStartsOn, setWeekStartsOn] = useState<WeekStartPreference>(initial.weekStartsOn ?? 'monday')
   const [sidebarMenuOpen, setSidebarMenuOpen] = useState(false)
   const [mobileNavOpen, setMobileNavOpen] = useState(false)
   const [isImmersive, setIsImmersive] = useState(false)
+  const [immersiveControlsVisible, setImmersiveControlsVisible] = useState(true)
+  const controlsVisibleRef = useRef(true)
+  const inactivityTimerRef = useRef<number | null>(null)
   const [page,setPage] = useState<Page>('clock')
   const [now,setNow] = useState(Date.now())
   const [timerInput,setTimerInput] = useState('25')
-  const [clockMode,setClockMode] = useState<'stopwatch'|'timer'>('stopwatch')
+  const [clockMode,setClockMode] = useState<'stopwatch'|'timer'|'focus'>(initial.activeFocus ? 'focus' : 'stopwatch')
+  const [focusConfig, setFocusConfig] = useState<FocusSessionConfig>(initial.focusConfig ?? DEFAULT_FOCUS_CONFIG)
+  const [activeFocus, setActiveFocus] = useState<FocusSessionState | null>(initial.activeFocus ?? null)
   const [selectedCategory,setSelectedCategory] = useState('')
   const [selectedSub,setSelectedSub] = useState('')
   const [assignOpen,setAssignOpen] = useState(false)
@@ -199,6 +245,12 @@ export default function App() {
     if (prefs) {
       setTheme(prefs.theme)
       setGoal(String(prefs.dailyGoalHours))
+      if (typeof prefs.dayStartHour === 'number') {
+        setDayStartHour(prefs.dayStartHour)
+      }
+      if (prefs.weekStartsOn) {
+        setWeekStartsOn(prefs.weekStartsOn)
+      }
     }
   }, [])
 
@@ -221,7 +273,10 @@ export default function App() {
   }, [user, migrationDismissed])
 
   // ── Local persistence & timer ticking (with background Web Worker) ────────
-  const isRunning = (active !== null && active.status === 'running') || completedTimer !== null;
+  const isRunning =
+    (active !== null && active.status === 'running') ||
+    completedTimer !== null ||
+    (activeFocus !== null && activeFocus.status === 'running');
 
   useEffect(() => {
     let worker: Worker | null = null
@@ -285,8 +340,12 @@ export default function App() {
       clockFont,
       clockStyle,
       sidebarMode,
+      dayStartHour,
+      weekStartsOn,
+      activeFocus,
+      focusConfig,
     }))
-  },[sessions,categories,active,theme,goal,appFont,clockFont,clockStyle,sidebarMode])
+  },[sessions,categories,active,theme,goal,appFont,clockFont,clockStyle,sidebarMode,dayStartHour,weekStartsOn,activeFocus,focusConfig])
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme
@@ -304,6 +363,25 @@ export default function App() {
     document.documentElement.dataset.clockStyle = clockStyle
   },[clockStyle])
 
+  // ── Tab Closing Protection (Warn beforeunload when tracking is actively running) ──
+  useEffect(() => {
+    const isTrackingRunning =
+      (active !== null && active.status === 'running') ||
+      (activeFocus !== null && activeFocus.status === 'running')
+    if (!isTrackingRunning) return
+
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault()
+      e.returnValue = ''
+      return ''
+    }
+
+    window.addEventListener('beforeunload', handleBeforeUnload)
+    return () => {
+      window.removeEventListener('beforeunload', handleBeforeUnload)
+    }
+  }, [active?.status, activeFocus?.status])
+
   // Timestamp-based elapsed calculation (never counts paused time)
   const elapsed = useMemo(()=>{
     if(!active) return 0
@@ -318,18 +396,60 @@ export default function App() {
 
   useEffect(()=>{ pipStateRef.current={active,elapsed} },[active,elapsed])
 
-  const todayKey = dateKey(now);
+  const todayKey = getTrackingDateKey(now, dayStartHour);
+  const todayRange = useMemo(() => {
+    return getDayBoundaryRange(getTrackingDate(now, dayStartHour), dayStartHour);
+  }, [now, dayStartHour]);
+
   const totalToday = useMemo(() => {
-    const past = sessions.filter(s => dateKey(s.start) === todayKey).reduce((a, s) => a + s.duration, 0);
-    const curr = (active && dateKey(active.startedAt || now) === todayKey)
-      ? (active.mode === 'stopwatch' ? elapsed : active.duration - elapsed)
-      : 0;
+    // Only focus sessions and non-break sessions count as study time!
+    const past = sessions
+      .filter(s => !isSessionBreak(s, categories))
+      .reduce((acc, s) => acc + getSessionDayOverlap(s, todayRange.start, todayRange.end), 0);
+    let curr = (active && active.startedAt)
+      ? getSessionDayOverlap(
+          {
+            start: active.startedAt,
+            end: now,
+            duration: active.mode === 'stopwatch' ? elapsed : active.duration - elapsed
+          },
+          todayRange.start,
+          todayRange.end
+        )
+      : (active && !active.startedAt)
+        ? (active.mode === 'stopwatch' ? elapsed : active.duration - elapsed)
+        : 0;
+
+    // Active focus session contributes to study time only during focus phase
+    if (activeFocus && activeFocus.currentPhase === 'focus') {
+      let focusElapsed = activeFocus.phaseElapsed;
+      if (activeFocus.status === 'running' && activeFocus.phaseStartedAt) {
+        focusElapsed += Math.max(0, (now - activeFocus.phaseStartedAt) / 1000);
+      }
+      if (activeFocus.phaseStartedAt) {
+        const focusStart = activeFocus.phaseStartedAt - (activeFocus.phaseElapsed * 1000);
+        curr += getSessionDayOverlap(
+          {
+            start: focusStart,
+            end: now,
+            duration: focusElapsed,
+          },
+          todayRange.start,
+          todayRange.end
+        );
+      } else {
+        curr += focusElapsed;
+      }
+    }
+
     return past + curr;
-  }, [sessions, active, elapsed, now, todayKey]);
+  }, [sessions, categories, active, elapsed, activeFocus, now, todayRange]);
 
   const todaySessions = useMemo(() => {
-    return sessions.filter(s => dateKey(s.start) === todayKey).sort((a, b) => b.start - a.start);
-  }, [sessions, todayKey]);
+    return sessions
+      .filter(s => getSessionDayOverlap(s, todayRange.start, todayRange.end) > 0)
+      .sort((a, b) => b.start - a.start);
+  }, [sessions, todayRange]);
   const currentCategory = categories.find(c=>c.id===selectedCategory)
 
   // ── Category management ────────────────────────────────────────────────────
@@ -369,7 +489,7 @@ export default function App() {
   }
 
   // ── Session management ─────────────────────────────────────────────────────
-  const saveSession = useCallback((data:{start:number;end:number;duration:number;source:'stopwatch'|'timer'|'manual';category:string;subcategory:string;notes?:string}): Session | null =>{
+  const saveSession = useCallback((data:{start:number;end:number;duration:number;source:'stopwatch'|'timer'|'manual'|'focus'|'break';category:string;subcategory:string;notes?:string;parentSessionId?:string}): Session | null =>{
     if(data.duration<1) return null
     const session: Session = {id:uid(),...data}
     setSessions(prev=>[session,...prev])
@@ -417,7 +537,11 @@ export default function App() {
   },[active,elapsed,finishActive,now])
 
   useEffect(()=>{
-    if (active) {
+    if (activeFocus && activeFocus.status !== 'completed' && activeFocus.status !== 'cancelled') {
+      const remaining = getPhaseRemainingTime(activeFocus, now)
+      const phaseLabel = activeFocus.currentPhase === 'focus' ? 'Focus' : 'Break'
+      document.title = `${fmt(remaining)} · ${phaseLabel} (${activeFocus.currentCycle}/${activeFocus.config.totalCycles})`
+    } else if (active) {
       document.title = fmt(elapsed)
     } else if (completedTimer) {
       const overtimeSec = Math.max(0, Math.floor((now - completedTimer.finishedAt) / 1000))
@@ -427,13 +551,18 @@ export default function App() {
     } else {
       document.title = 'Chrono'
     }
-  },[active, elapsed, completedTimer, now])
+  },[active, elapsed, completedTimer, activeFocus, now])
 
   // ── Preferences sync ───────────────────────────────────────────────────────
   useEffect(()=>{
-    if(user) pushPreferences({ theme, dailyGoalHours: Math.max(1, Number(goal)||4) })
+    if(user) pushPreferences({
+      theme,
+      dailyGoalHours: Math.max(1, Number(goal)||4),
+      dayStartHour,
+      weekStartsOn,
+    })
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  },[theme, goal, user])
+  },[theme, goal, dayStartHour, weekStartsOn, user])
 
   // ── Timer controls ─────────────────────────────────────────────────────────
   const startStopwatch = () => {
@@ -459,6 +588,189 @@ export default function App() {
     setActive(null)
     setCompletedTimer(null)
   }
+
+  // ── Focus Session controls & state machine ──────────────────────────────────
+  const notifyPhase = (title: string, body: string) => {
+    if (typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'granted') {
+      try {
+        new Notification(title, {
+          body,
+          icon: '/favicon-32x32.png',
+        })
+      } catch {}
+    }
+  }
+
+  const startFocus = () => {
+    const timestamp = Date.now()
+    const newSession = createFocusSession(focusConfig, selectedCategory, selectedSub)
+    const running = startFocusSession(newSession, timestamp)
+    setActiveFocus(running)
+    setClockMode('focus')
+    setNow(timestamp)
+    if (typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'default') {
+      Notification.requestPermission().catch(() => {})
+    }
+  }
+
+  const pauseFocus = () => {
+    if (!activeFocus || activeFocus.status !== 'running') return
+    const timestamp = Date.now()
+    setNow(timestamp)
+    setActiveFocus(pauseFocusSession(activeFocus, timestamp))
+  }
+
+  const resumeFocus = () => {
+    if (!activeFocus || activeFocus.status !== 'paused') return
+    const timestamp = Date.now()
+    setNow(timestamp)
+    setActiveFocus(resumeFocusSession(activeFocus, timestamp))
+  }
+
+  const skipActiveBreak = () => {
+    if (!activeFocus) return
+    const timestamp = Date.now()
+    const skipped = skipBreak(activeFocus, timestamp)
+    const lastInt = skipped.intervals[skipped.intervals.length - 1]
+    if (lastInt && !lastInt.completed) {
+      saveSession({
+        start: lastInt.startTime,
+        end: lastInt.endTime,
+        duration: lastInt.duration,
+        source: 'break',
+        category: activeFocus.category || selectedCategory,
+        subcategory: `${lastInt.phase === 'long_break' ? 'Long' : 'Short'} break`,
+        notes: `Skipped ${lastInt.phase === 'long_break' ? 'long' : 'short'} break (Cycle ${lastInt.cycle})`,
+        parentSessionId: activeFocus.id,
+      })
+    }
+    setActiveFocus(skipped)
+    setNow(timestamp)
+  }
+
+  const finishFocusSession = () => {
+    if (!activeFocus) return
+    const timestamp = Date.now()
+    const { session: ended, finalInterval } = endFocusSession(activeFocus, timestamp, true)
+    if (finalInterval) {
+      const isFocus = finalInterval.phase === 'focus'
+      saveSession({
+        start: finalInterval.startTime,
+        end: finalInterval.endTime,
+        duration: finalInterval.duration,
+        source: isFocus ? 'focus' : 'break',
+        category: activeFocus.category || selectedCategory,
+        subcategory: isFocus ? (activeFocus.subcategory || selectedSub) : `${finalInterval.phase === 'long_break' ? 'Long' : 'Short'} break`,
+        notes: isFocus ? `Focus cycle ${finalInterval.cycle}/${activeFocus.config.totalCycles}` : `${finalInterval.phase === 'long_break' ? 'Long' : 'Short'} break`,
+        parentSessionId: activeFocus.id,
+      })
+    }
+    setActiveFocus(ended)
+    setNow(timestamp)
+  }
+
+  const discardFocusSession = () => {
+    setActiveFocus(null)
+  }
+
+  const resetFocusToSetup = () => {
+    setActiveFocus(null)
+  }
+
+  const selectFocusPreset = (presetKey: FocusPreset) => {
+    if (presetKey === 'custom') {
+      setFocusConfig(prev => ({ ...prev, preset: 'custom' }))
+      return
+    }
+    const p = FOCUS_PRESETS[presetKey]
+    if (p) {
+      setFocusConfig(prev => ({
+        ...prev,
+        preset: presetKey,
+        focusDuration: p.focusDuration,
+        shortBreakDuration: p.shortBreakDuration,
+        longBreakDuration: p.longBreakDuration,
+        totalCycles: p.totalCycles,
+        longBreakEvery: p.longBreakEvery,
+      }))
+    }
+  }
+
+  const updateFocusMinutes = (field: 'focus' | 'shortBreak' | 'longBreak', minutes: number) => {
+    const clamped = Math.max(1, Math.min(720, Math.round(Number(minutes) || 1)))
+    setFocusConfig(prev => {
+      const next = { ...prev, preset: 'custom' as FocusPreset }
+      if (field === 'focus') next.focusDuration = clamped * 60
+      else if (field === 'shortBreak') next.shortBreakDuration = clamped * 60
+      else if (field === 'longBreak') next.longBreakDuration = clamped * 60
+      return next
+    })
+  }
+
+  const updateFocusCycles = (field: 'cycles' | 'longBreakEvery', val: number) => {
+    const clamped = Math.max(1, Math.min(24, Math.round(Number(val) || 1)))
+    setFocusConfig(prev => {
+      const next = { ...prev, preset: 'custom' as FocusPreset }
+      if (field === 'cycles') next.totalCycles = clamped
+      else if (field === 'longBreakEvery') next.longBreakEvery = clamped
+      return next
+    })
+  }
+
+  const focusEstimate = useMemo(() => {
+    return calculateEstimatedSessionDuration(focusConfig)
+  }, [focusConfig])
+
+  // ── Focus Session background ticker & phase transitions ────────────────────
+  useEffect(() => {
+    if (!activeFocus || activeFocus.status !== 'running') return
+    const result = advanceFocusSession(activeFocus, now)
+
+    if (result.completedIntervals.length > 0) {
+      result.completedIntervals.forEach(int => {
+        const isFocus = int.phase === 'focus'
+        saveSession({
+          start: int.startTime,
+          end: int.endTime,
+          duration: int.duration,
+          source: isFocus ? 'focus' : 'break',
+          category: activeFocus.category || selectedCategory,
+          subcategory: isFocus
+            ? (activeFocus.subcategory || selectedSub)
+            : `${int.phase === 'long_break' ? 'Long' : 'Short'} break`,
+          notes: isFocus
+            ? `Focus cycle ${int.cycle}/${activeFocus.config.totalCycles}`
+            : `${int.phase === 'long_break' ? 'Long' : 'Short'} break (Cycle ${int.cycle})`,
+          parentSessionId: activeFocus.id,
+        })
+      })
+
+      if (activeFocus.config.soundEnabled) {
+        playTimerChime()
+      }
+
+      if (result.sessionFinished) {
+        notifyPhase(
+          'Focus Session Completed!',
+          `You completed all ${activeFocus.config.totalCycles} focus cycles.`
+        )
+      } else if (result.phaseTransitioned) {
+        const nextLabel = result.phaseTransitioned.toPhase === 'focus'
+          ? `Focus Cycle ${result.phaseTransitioned.cycle + 1}`
+          : result.phaseTransitioned.toPhase === 'long_break'
+          ? 'Long Break'
+          : 'Short Break'
+        notifyPhase(
+          'Phase Completed',
+          `Time for ${nextLabel}!`
+        )
+      }
+    }
+
+    if (result.session !== activeFocus) {
+      setActiveFocus(result.session)
+    }
+  }, [now, activeFocus, saveSession, selectedCategory, selectedSub])
 
   const closeAssignModal = () => {
     setPendingSessionId(null)
@@ -489,8 +801,42 @@ export default function App() {
   }
 
   // ── Immersive Fullscreen Mode & Screen Wake Lock ───────────────────────────
+  const clearInactivityTimer = useCallback(() => {
+    if (inactivityTimerRef.current !== null) {
+      clearTimeout(inactivityTimerRef.current)
+      inactivityTimerRef.current = null
+    }
+  }, [])
+
+  const resetInactivityTimer = useCallback(() => {
+    clearInactivityTimer()
+    inactivityTimerRef.current = window.setTimeout(() => {
+      controlsVisibleRef.current = false
+      setImmersiveControlsVisible(false)
+    }, 3000)
+  }, [clearInactivityTimer])
+
+  const revealControls = useCallback(() => {
+    if (!controlsVisibleRef.current) {
+      controlsVisibleRef.current = true
+      setImmersiveControlsVisible(true)
+    }
+    resetInactivityTimer()
+  }, [resetInactivityTimer])
+
+  const hideControls = useCallback(() => {
+    clearInactivityTimer()
+    if (controlsVisibleRef.current) {
+      controlsVisibleRef.current = false
+      setImmersiveControlsVisible(false)
+    }
+  }, [clearInactivityTimer])
+
   const enterImmersive = async () => {
     setIsImmersive(true)
+    controlsVisibleRef.current = true
+    setImmersiveControlsVisible(true)
+    resetInactivityTimer()
     try {
       if (document.documentElement.requestFullscreen) {
         await document.documentElement.requestFullscreen()
@@ -505,7 +851,37 @@ export default function App() {
       document.exitFullscreen().catch(() => {})
     }
     setIsImmersive(false)
+    clearInactivityTimer()
+    controlsVisibleRef.current = true
+    setImmersiveControlsVisible(true)
   }
+
+  // Auto-hiding controls in immersive mode (3s inactivity timer on mousemove / keydown)
+  useEffect(() => {
+    if (!isImmersive) {
+      clearInactivityTimer()
+      controlsVisibleRef.current = true
+      setImmersiveControlsVisible(true)
+      return
+    }
+
+    controlsVisibleRef.current = true
+    setImmersiveControlsVisible(true)
+    resetInactivityTimer()
+
+    const handleUserActivity = () => {
+      revealControls()
+    }
+
+    window.addEventListener('mousemove', handleUserActivity, { passive: true })
+    window.addEventListener('keydown', handleUserActivity, { passive: true })
+
+    return () => {
+      window.removeEventListener('mousemove', handleUserActivity)
+      window.removeEventListener('keydown', handleUserActivity)
+      clearInactivityTimer()
+    }
+  }, [isImmersive, clearInactivityTimer, resetInactivityTimer, revealControls])
 
   // Synchronize React state with browser fullscreenchange events
   useEffect(() => {
@@ -553,7 +929,16 @@ export default function App() {
         exitImmersive()
       } else if (e.code === 'Space') {
         e.preventDefault()
-        if (!active) {
+        revealControls()
+        if (clockMode === 'focus') {
+          if (!activeFocus) {
+            startFocus()
+          } else if (activeFocus.status === 'running') {
+            pauseFocus()
+          } else if (activeFocus.status === 'paused') {
+            resumeFocus()
+          }
+        } else if (!active) {
           if (clockMode === 'stopwatch') startStopwatch()
           else startTimer()
         } else {
@@ -561,15 +946,22 @@ export default function App() {
           else resume()
         }
       } else if (e.key === 'r' || e.key === 'R') {
-        if (!active || active.status === 'paused') {
+        if (clockMode === 'focus') {
+          if (!activeFocus || activeFocus.status === 'paused') {
+            e.preventDefault()
+            revealControls()
+            discardFocusSession()
+          }
+        } else if (!active || active.status === 'paused') {
           e.preventDefault()
+          revealControls()
           reset()
         }
       }
     }
     window.addEventListener('keydown', handleKeyDown)
     return () => window.removeEventListener('keydown', handleKeyDown)
-  }, [isImmersive, active, clockMode])
+  }, [isImmersive, active, activeFocus, clockMode, revealControls])
 
   // Click outside to close sidebar layout menu
   useEffect(() => {
@@ -664,7 +1056,16 @@ export default function App() {
       user: user?.email ?? 'local-user',
       sessions,
       categories,
-      preferences: { theme, dailyGoalHours: Number(goal)||4 }
+      preferences: {
+        theme,
+        dailyGoalHours: Number(goal)||4,
+        appFont,
+        clockFont,
+        clockStyle,
+        sidebarMode,
+        dayStartHour,
+        weekStartsOn,
+      }
     }
     const url=URL.createObjectURL(new Blob([JSON.stringify(payload,null,2)],{type:'application/json'}))
     const a=document.createElement('a'); a.href=url; a.download='chrono-backup.json'; a.click(); URL.revokeObjectURL(url)
@@ -673,10 +1074,49 @@ export default function App() {
   // ── Computed analytics ────────────────────────────────────────────────────
   const dailyGoalSeconds=Math.max(1,Number(goal)||4)*3600
   const progress=Math.min(100,totalToday/dailyGoalSeconds*100)
-  const categoryTotals=categories.map(c=>({...c,total:sessions.filter(s=>s.category===c.id && dateKey(s.start)===dateKey(now)).reduce((a,s)=>a+s.duration,0)})).filter(c=>c.total>0)
-  const allTime=sessions.reduce((a,s)=>a+s.duration,0)
-  const weekStart=new Date(now); weekStart.setHours(0,0,0,0); weekStart.setDate(weekStart.getDate()-((weekStart.getDay()+6)%7))
-  const weekTotal=sessions.filter(s=>s.start>=weekStart.getTime()).reduce((a,s)=>a+s.duration,0)
+  const categoryTotals=categories.map(c=>({
+    ...c,
+    total:sessions.filter(s=>!isSessionBreak(s, categories) && s.category===c.id).reduce((a,s)=>a+getSessionDayOverlap(s,todayRange.start,todayRange.end),0)
+  })).filter(c=>c.total>0)
+  const allTime=sessions.filter(s=>!isSessionBreak(s, categories)).reduce((a,s)=>a+s.duration,0)
+  const weekRange=useMemo(()=>{
+    return getWeekRange(now, dayStartHour, weekStartsOn);
+  },[now, dayStartHour, weekStartsOn]);
+  const weekTotal=useMemo(()=>{
+    const past = sessions.filter(s=>!isSessionBreak(s, categories)).reduce((a,s)=>a+getSessionDayOverlap(s,weekRange.start,weekRange.end),0)
+    let curr = (active && active.startedAt)
+      ? getSessionDayOverlap({
+          start: active.startedAt,
+          end: now,
+          duration: active.mode === 'stopwatch' ? elapsed : active.duration - elapsed
+        }, weekRange.start, weekRange.end)
+      : (active && !active.startedAt)
+        ? (active.mode === 'stopwatch' ? elapsed : active.duration - elapsed)
+        : 0;
+
+    if (activeFocus && activeFocus.currentPhase === 'focus') {
+      let focusElapsed = activeFocus.phaseElapsed;
+      if (activeFocus.status === 'running' && activeFocus.phaseStartedAt) {
+        focusElapsed += Math.max(0, (now - activeFocus.phaseStartedAt) / 1000);
+      }
+      if (activeFocus.phaseStartedAt) {
+        const focusStart = activeFocus.phaseStartedAt - (activeFocus.phaseElapsed * 1000);
+        curr += getSessionDayOverlap(
+          {
+            start: focusStart,
+            end: now,
+            duration: focusElapsed
+          },
+          weekRange.start,
+          weekRange.end
+        );
+      } else {
+        curr += focusElapsed;
+      }
+    }
+
+    return past + curr;
+  },[sessions, categories, active, elapsed, activeFocus, now, weekRange]);
 
   // ── Auth loading state ────────────────────────────────────────────────────
   if (authLoading) {
@@ -953,68 +1393,256 @@ export default function App() {
 
               <section className="unified-clock-card">
                 <div className="mode-switch" role="tablist" aria-label="Clock mode">
-                  <LiquidGlass as="button" role="tab" aria-selected={clockMode==='stopwatch'} className={clockMode==='stopwatch'?'selected':''} disabled={!!active} onClick={()=>setClockMode('stopwatch')} radius={999} bevelDepth={8} scale={20}><Clock3 size={16}/> Stopwatch</LiquidGlass>
-                  <LiquidGlass as="button" role="tab" aria-selected={clockMode==='timer'} className={clockMode==='timer'?'selected':''} disabled={!!active} onClick={()=>setClockMode('timer')} radius={999} bevelDepth={8} scale={20}><Timer size={16}/> Timer</LiquidGlass>
+                  <LiquidGlass as="button" role="tab" aria-selected={clockMode==='stopwatch'} className={clockMode==='stopwatch'?'selected':''} disabled={!!active || (activeFocus !== null && activeFocus.status === 'running')} onClick={()=>setClockMode('stopwatch')} radius={999} bevelDepth={8} scale={20}><Clock3 size={16}/> Stopwatch</LiquidGlass>
+                  <LiquidGlass as="button" role="tab" aria-selected={clockMode==='timer'} className={clockMode==='timer'?'selected':''} disabled={!!active || (activeFocus !== null && activeFocus.status === 'running')} onClick={()=>setClockMode('timer')} radius={999} bevelDepth={8} scale={20}><Timer size={16}/> Timer</LiquidGlass>
+                  <LiquidGlass as="button" role="tab" aria-selected={clockMode==='focus'} className={clockMode==='focus'?'selected':''} disabled={!!active || (activeFocus !== null && activeFocus.status === 'running')} onClick={()=>setClockMode('focus')} radius={999} bevelDepth={8} scale={20}><Target size={16}/> Focus Session</LiquidGlass>
                 </div>
-                <div className={`unified-clock-display clock-style-${clockStyle}`} aria-live="off">
-                  {active ? (
-                    active.mode==='stopwatch' ? fmtHms(elapsed) : fmt(elapsed)
-                  ) : completedTimer ? (
-                    `-${fmt(Math.max(0, Math.floor((now - completedTimer.finishedAt)/1000)))}`
-                  ) : clockMode==='stopwatch' ? (
-                    '00:00:00'
+
+                {clockMode === 'focus' ? (
+                  activeFocus && activeFocus.status === 'completed' ? (
+                    <div className="focus-completion-card">
+                      <div className="focus-completion-title">FOCUS SESSION COMPLETED</div>
+                      <div className="focus-completion-stats">
+                        <div className="focus-stat-block">
+                          <span>Focus time</span>
+                          <b>{durationLabel(getFocusSessionTotals(activeFocus).totalFocusSeconds)}</b>
+                        </div>
+                        <div className="focus-stat-block">
+                          <span>Break time</span>
+                          <b>{durationLabel(getFocusSessionTotals(activeFocus).totalBreakSeconds)}</b>
+                        </div>
+                        <div className="focus-stat-block">
+                          <span>Completed</span>
+                          <b>{getFocusSessionTotals(activeFocus).completedCycles} of {activeFocus.config.totalCycles}</b>
+                        </div>
+                      </div>
+                      <LiquidGlass as="button" className="primary-btn clock-start" onClick={resetFocusToSetup} radius={999} bevelDepth={12} scale={26}>
+                        New Session
+                      </LiquidGlass>
+                    </div>
+                  ) : activeFocus ? (
+                    <>
+                      <div className={`unified-clock-display clock-style-${clockStyle}`} aria-live="off">
+                        {fmt(getPhaseRemainingTime(activeFocus, now))}
+                      </div>
+                      <div className={`focus-phase-badge ${activeFocus.currentPhase !== 'focus' ? 'phase-break' : ''}`}>
+                        <span>{activeFocus.currentPhase === 'focus' ? 'FOCUS' : activeFocus.currentPhase === 'long_break' ? 'LONG BREAK' : 'SHORT BREAK'}</span>
+                        <span>·</span>
+                        <span>CYCLE {activeFocus.currentCycle} OF {activeFocus.config.totalCycles}</span>
+                      </div>
+                      <div className="clock-status">
+                        {activeFocus.status === 'running'
+                          ? (activeFocus.currentPhase === 'focus' ? 'FOCUS IN PROGRESS' : 'BREAK TIME')
+                          : 'PAUSED'}
+                      </div>
+                      <div className="unified-controls">
+                        <LiquidGlass as="button" className="primary-btn clock-start" onClick={activeFocus.status === 'running' ? pauseFocus : resumeFocus} radius={999} bevelDepth={12} scale={32}>
+                          {activeFocus.status === 'running' ? <Pause size={17}/> : <Play size={17}/>} {activeFocus.status === 'running' ? 'Pause' : 'Resume'}
+                        </LiquidGlass>
+                        {activeFocus.currentPhase !== 'focus' && (
+                          <LiquidGlass as="button" className="soft-btn" onClick={skipActiveBreak} radius={999} bevelDepth={10} scale={22}>
+                            <FastForward size={16}/> Skip break
+                          </LiquidGlass>
+                        )}
+                        <LiquidGlass as="button" className="soft-btn" onClick={finishFocusSession} radius={999} bevelDepth={10} scale={22}>
+                          <Check size={16}/> End session
+                        </LiquidGlass>
+                        <LiquidGlass as="button" className="round-btn" onClick={discardFocusSession} title="Discard session" radius={999} bevelDepth={10} scale={22}>
+                          <RotateCcw size={16}/>
+                        </LiquidGlass>
+                        <LiquidGlass as="button" className="round-btn" onClick={enterImmersive} title="Immersive full-screen mode" radius={999} bevelDepth={10} scale={22}>
+                          <Maximize2 size={16}/>
+                        </LiquidGlass>
+                      </div>
+                    </>
                   ) : (
-                    fmt(Math.max(0,Number(timerInput||0)*60))
-                  )}
-                </div>
-                <div className={`clock-status ${completedTimer && !active ? 'overdue' : ''}`}>
-                  {active ? (
-                    active.status==='running' ? 'IN PROGRESS' : 'PAUSED'
-                  ) : completedTimer ? (
-                    `${Math.max(1, Math.round(completedTimer.duration/60))} MIN TIMER OVER`
-                  ) : clockMode==='stopwatch' ? (
-                    'READY WHEN YOU ARE'
-                  ) : (
-                    'SET A DURATION'
-                  )}
-                </div>
-                {(!active && !completedTimer && clockMode==='timer') && (
-                  <div className="duration-control">
-                    <div className="duration-presets">{[5,15,25,45,60].map(n=><LiquidGlass as="button" key={n} className={Number(timerInput)===n?'chosen':''} onClick={()=>setTimerInput(String(n))} radius={999} bevelDepth={8} scale={18}>{n}m</LiquidGlass>)}</div>
-                    <label className="duration-custom">
-                      <span>Custom</span>
-                      <input aria-label="Timer duration in minutes" type="number" min="1" max="999" value={timerInput} onChange={e=>setTimerInput(e.target.value)}/>
-                      <span>min</span>
-                    </label>
-                  </div>
+                    <>
+                      <div className={`unified-clock-display clock-style-${clockStyle}`} aria-live="off">
+                        {fmt(focusConfig.focusDuration)}
+                      </div>
+                      <div className="clock-status">
+                        READY TO FOCUS
+                      </div>
+                      <div className="focus-setup-panel">
+                        <div className="focus-presets-bar">
+                          {(['pomodoro', 'deep_work', 'extended_focus', 'custom'] as const).map(p => (
+                            <LiquidGlass
+                              as="button"
+                              key={p}
+                              className={focusConfig.preset === p ? 'chosen' : ''}
+                              onClick={() => selectFocusPreset(p)}
+                              radius={999} bevelDepth={6} scale={16}
+                            >
+                              {p === 'pomodoro' ? 'Pomodoro' : p === 'deep_work' ? 'Deep Work' : p === 'extended_focus' ? 'Extended Focus' : 'Custom'}
+                            </LiquidGlass>
+                          ))}
+                        </div>
+
+                        <div className="focus-config-grid">
+                          <div className="focus-config-item">
+                            <span className="config-label">Focus</span>
+                            <div className="focus-config-input-wrap">
+                              <input
+                                type="number"
+                                min="1"
+                                max="720"
+                                value={Math.round(focusConfig.focusDuration / 60)}
+                                onChange={e => updateFocusMinutes('focus', Number(e.target.value))}
+                              />
+                              <span className="config-unit">min</span>
+                            </div>
+                          </div>
+                          <div className="focus-config-item">
+                            <span className="config-label">Short break</span>
+                            <div className="focus-config-input-wrap">
+                              <input
+                                type="number"
+                                min="1"
+                                max="180"
+                                value={Math.round(focusConfig.shortBreakDuration / 60)}
+                                onChange={e => updateFocusMinutes('shortBreak', Number(e.target.value))}
+                              />
+                              <span className="config-unit">min</span>
+                            </div>
+                          </div>
+                          <div className="focus-config-item">
+                            <span className="config-label">Long break</span>
+                            <div className="focus-config-input-wrap">
+                              <input
+                                type="number"
+                                min="1"
+                                max="360"
+                                value={Math.round(focusConfig.longBreakDuration / 60)}
+                                onChange={e => updateFocusMinutes('longBreak', Number(e.target.value))}
+                              />
+                              <span className="config-unit">min</span>
+                            </div>
+                          </div>
+                          <div className="focus-config-item">
+                            <span className="config-label">Cycles</span>
+                            <div className="focus-config-input-wrap">
+                              <input
+                                type="number"
+                                min="1"
+                                max="24"
+                                value={focusConfig.totalCycles}
+                                onChange={e => updateFocusCycles('cycles', Number(e.target.value))}
+                              />
+                              <span className="config-unit">cycles</span>
+                            </div>
+                          </div>
+                          <div className="focus-config-item">
+                            <span className="config-label">Long break every</span>
+                            <div className="focus-config-input-wrap">
+                              <input
+                                type="number"
+                                min="1"
+                                max="24"
+                                value={focusConfig.longBreakEvery}
+                                onChange={e => updateFocusCycles('longBreakEvery', Number(e.target.value))}
+                              />
+                              <span className="config-unit">cycles</span>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="focus-options-row">
+                          <label className="focus-toggle-label">
+                            <input
+                              type="checkbox"
+                              checked={focusConfig.autoStartNextPhase}
+                              onChange={e => setFocusConfig(prev => ({ ...prev, autoStartNextPhase: e.target.checked }))}
+                            />
+                            <span>Auto-start next phase</span>
+                          </label>
+                          <label className="focus-toggle-label">
+                            <input
+                              type="checkbox"
+                              checked={focusConfig.soundEnabled}
+                              onChange={e => setFocusConfig(prev => ({ ...prev, soundEnabled: e.target.checked }))}
+                            />
+                            <span>Sound alerts</span>
+                          </label>
+                        </div>
+
+                        <div className="focus-estimate-bar">
+                          <span>Estimate: <b>{Math.round(focusEstimate.totalFocusSeconds / 60)}m</b> focus + <b>{Math.round(focusEstimate.totalBreakSeconds / 60)}m</b> break = <b>{durationLabel(focusEstimate.totalSessionSeconds)}</b></span>
+                        </div>
+
+                        <div className="unified-controls">
+                          <LiquidGlass as="button" className="primary-btn clock-start" onClick={startFocus} radius={999} bevelDepth={12} scale={32}>
+                            <Play size={17} fill="currentColor"/> Start focus session
+                          </LiquidGlass>
+                          <LiquidGlass as="button" className="round-btn" onClick={enterImmersive} title="Immersive full-screen mode" radius={999} bevelDepth={10} scale={22}>
+                            <Maximize2 size={16}/>
+                          </LiquidGlass>
+                        </div>
+                      </div>
+                    </>
+                  )
+                ) : (
+                  <>
+                    <div className={`unified-clock-display clock-style-${clockStyle}`} aria-live="off">
+                      {active ? (
+                        active.mode==='stopwatch' ? fmtHms(elapsed) : fmt(elapsed)
+                      ) : completedTimer ? (
+                        `-${fmt(Math.max(0, Math.floor((now - completedTimer.finishedAt)/1000)))}`
+                      ) : clockMode==='stopwatch' ? (
+                        '00:00:00'
+                      ) : (
+                        fmt(Math.max(0,Number(timerInput||0)*60))
+                      )}
+                    </div>
+                    <div className={`clock-status ${completedTimer && !active ? 'overdue' : ''}`}>
+                      {active ? (
+                        active.status==='running' ? 'IN PROGRESS' : 'PAUSED'
+                      ) : completedTimer ? (
+                        `${Math.max(1, Math.round(completedTimer.duration/60))} MIN TIMER OVER`
+                      ) : clockMode==='stopwatch' ? (
+                        'READY WHEN YOU ARE'
+                      ) : (
+                        'SET A DURATION'
+                      )}
+                    </div>
+                    {(!active && !completedTimer && clockMode==='timer') && (
+                      <div className="duration-control">
+                        <div className="duration-presets">{[5,15,25,45,60].map(n=><LiquidGlass as="button" key={n} className={Number(timerInput)===n?'chosen':''} onClick={()=>setTimerInput(String(n))} radius={999} bevelDepth={8} scale={18}>{n}m</LiquidGlass>)}</div>
+                        <label className="duration-custom">
+                          <span>Custom</span>
+                          <input aria-label="Timer duration in minutes" type="number" min="1" max="999" value={timerInput} onChange={e=>setTimerInput(e.target.value)}/>
+                          <span>min</span>
+                        </label>
+                      </div>
+                    )}
+                    <div className="unified-controls">
+                      {!active ? (
+                        <>
+                          <LiquidGlass as="button" className="primary-btn clock-start" onClick={clockMode==='stopwatch'?startStopwatch:startTimer} disabled={clockMode==='timer'&&(!Number(timerInput)||Number(timerInput)<=0)} radius={999} bevelDepth={12} scale={32}>
+                            <Play size={17} fill="currentColor"/> Start {clockMode==='stopwatch'?'stopwatch':'timer'}
+                          </LiquidGlass>
+                          <LiquidGlass as="button" className="round-btn" onClick={enterImmersive} title="Immersive full-screen mode" radius={999} bevelDepth={10} scale={22}>
+                            <Maximize2 size={16}/>
+                          </LiquidGlass>
+                        </>
+                      ) : (
+                        <>
+                          <LiquidGlass as="button" className="primary-btn clock-start" onClick={active.status==='running'?pause:resume} radius={999} bevelDepth={12} scale={32}>
+                            {active.status==='running'?<Pause size={17}/>:<Play size={17}/>} {active.status==='running'?'Pause':'Resume'}
+                          </LiquidGlass>
+                          <LiquidGlass as="button" className="soft-btn" onClick={stop} radius={999} bevelDepth={10} scale={22}>
+                            <Check size={16}/> Finish
+                          </LiquidGlass>
+                          <LiquidGlass as="button" className="round-btn" onClick={reset} title="Discard session" radius={999} bevelDepth={10} scale={22}>
+                            <RotateCcw size={16}/>
+                          </LiquidGlass>
+                          <LiquidGlass as="button" className="round-btn" onClick={enterImmersive} title="Immersive full-screen mode" radius={999} bevelDepth={10} scale={22}>
+                            <Maximize2 size={16}/>
+                          </LiquidGlass>
+                        </>
+                      )}
+                    </div>
+                  </>
                 )}
-                <div className="unified-controls">
-                  {!active ? (
-                    <>
-                      <LiquidGlass as="button" className="primary-btn clock-start" onClick={clockMode==='stopwatch'?startStopwatch:startTimer} disabled={clockMode==='timer'&&(!Number(timerInput)||Number(timerInput)<=0)} radius={999} bevelDepth={12} scale={32}>
-                        <Play size={17} fill="currentColor"/> Start {clockMode==='stopwatch'?'stopwatch':'timer'}
-                      </LiquidGlass>
-                      <LiquidGlass as="button" className="round-btn" onClick={enterImmersive} title="Immersive full-screen mode" radius={999} bevelDepth={10} scale={22}>
-                        <Maximize2 size={16}/>
-                      </LiquidGlass>
-                    </>
-                  ) : (
-                    <>
-                      <LiquidGlass as="button" className="primary-btn clock-start" onClick={active.status==='running'?pause:resume} radius={999} bevelDepth={12} scale={32}>
-                        {active.status==='running'?<Pause size={17}/>:<Play size={17}/>} {active.status==='running'?'Pause':'Resume'}
-                      </LiquidGlass>
-                      <LiquidGlass as="button" className="soft-btn" onClick={stop} radius={999} bevelDepth={10} scale={22}>
-                        <Check size={16}/> Finish
-                      </LiquidGlass>
-                      <LiquidGlass as="button" className="round-btn" onClick={reset} title="Discard session" radius={999} bevelDepth={10} scale={22}>
-                        <RotateCcw size={16}/>
-                      </LiquidGlass>
-                      <LiquidGlass as="button" className="round-btn" onClick={enterImmersive} title="Immersive full-screen mode" radius={999} bevelDepth={10} scale={22}>
-                        <Maximize2 size={16}/>
-                      </LiquidGlass>
-                    </>
-                  )}
-                </div>
 
                 {/* Embedded Optional Activity & Mini Clock Row inside the main card */}
                 <div className="clock-embedded-tagging">
@@ -1047,7 +1675,7 @@ export default function App() {
                     </LiquidGlass>
                   </div>
                 )}
-                <div className="clock-footnote">{active ? 'Your time is being recorded.' : 'One clock. Two ways to track your time.'}</div>
+                <div className="clock-footnote">{active || activeFocus ? 'Your time is being recorded.' : 'One clock. Three ways to track your time.'}</div>
               </section>
             </div>
 
@@ -1078,7 +1706,7 @@ export default function App() {
                     <div><h3>Today's rhythm</h3><p>When your time happened</p></div>
                     <LiquidGlass as="button" className="text-link" onClick={()=>setPage('analytics')} radius={8} bevelDepth={4} scale={12}>See insights <ChevronRight size={15}/></LiquidGlass>
                   </div>
-                  <HourlyChart sessions={sessions} now={now}/>
+                  <HourlyChart sessions={sessions} now={now} dayStartHour={dayStartHour}/>
                 </div>
                 <div className="panel recent-panel">
                   <div className="panel-heading">
@@ -1097,12 +1725,12 @@ export default function App() {
             <PageTitle eyebrow="THE BIG PICTURE" title="Your time, at a glance." subtitle="Little patterns can tell you a lot."/>
             <div className="stats-row">
               <Stat label="Today" value={durationLabel(totalToday)} note="Tracked so far"/>
-              <Stat label="This week" value={durationLabel(weekTotal)} note="Since Monday"/>
+              <Stat label="This week" value={durationLabel(weekTotal)} note={weekStartsOn === 'monday' ? 'Since Monday' : 'Since Sunday'}/>
               <Stat label="All time" value={durationLabel(allTime)} note={`${sessions.length} sessions`}/>
             </div>
             <div className="panel chart-panel">
               <div className="panel-heading"><div><h3>When do you spend your time?</h3><p>Hours of the day · all recorded sessions</p></div></div>
-              <HourlyChart sessions={sessions} now={now} large/>
+              <HourlyChart sessions={sessions} now={now} dayStartHour={dayStartHour} large/>
             </div>
             <div className="panel category-panel">
               <div className="panel-heading"><div><h3>Today's categories</h3><p>How your day is divided</p></div></div>
@@ -1125,7 +1753,13 @@ export default function App() {
                 <h3>{month.toLocaleDateString(undefined,{month:'long',year:'numeric'})}</h3>
                 <LiquidGlass as="button" className="round-btn" onClick={()=>setMonth(new Date(month.getFullYear(),month.getMonth()+1,1))} radius={999} bevelDepth={8} scale={20}><ChevronRight size={17}/></LiquidGlass>
               </div>
-              <CalendarGrid month={month} sessions={sessions}/>
+              <CalendarGrid
+                month={month}
+                sessions={sessions}
+                categories={categories}
+                dayStartHour={dayStartHour}
+                weekStartsOn={weekStartsOn}
+              />
               <div className="calendar-legend">
                 <span>Less</span>
                 {['var(--heat-1)','var(--heat-2)','var(--heat-3)','var(--heat-4)','var(--heat-5)'].map(c=><i key={c} style={{background:c}}/>)}
@@ -1135,7 +1769,14 @@ export default function App() {
             <div className="panel">
               <div className="panel-heading"><div><h3>Monthly little wins</h3><p>Time tracked this month</p></div></div>
               <div className="summary-value">
-                {durationLabel(sessions.filter(s=>{const d=new Date(s.start);return d.getMonth()===month.getMonth()&&d.getFullYear()===month.getFullYear()}).reduce((a,s)=>a+s.duration,0))}
+                {durationLabel(
+                  (() => {
+                    const daysInMonth = new Date(month.getFullYear(), month.getMonth() + 1, 0).getDate();
+                    const monthStart = new Date(month.getFullYear(), month.getMonth(), 1, dayStartHour, 0, 0, 0).getTime();
+                    const monthEnd = new Date(month.getFullYear(), month.getMonth(), daysInMonth + 1, dayStartHour, 0, 0, 0).getTime();
+                    return sessions.reduce((sum, s) => sum + getSessionDayOverlap(s, monthStart, monthEnd), 0);
+                  })()
+                )}
               </div>
             </div>
           </div>
@@ -1180,6 +1821,39 @@ export default function App() {
                 <div className="segmented">
                   <LiquidGlass as="button" className={theme==='light'?'selected':''} onClick={()=>setTheme('light')} radius={999} bevelDepth={8} scale={18}><Sun size={15}/> Light</LiquidGlass>
                   <LiquidGlass as="button" className={theme==='dark'?'selected':''} onClick={()=>setTheme('dark')} radius={999} bevelDepth={8} scale={18}><Moon size={15}/> Dark</LiquidGlass>
+                </div>
+              </div>
+
+              <div className="setting-row">
+                <div>
+                  <h3>Day starts at</h3>
+                  <p>Choose when your tracking day resets.</p>
+                </div>
+                <div style={{minWidth:'220px'}}>
+                  <CustomSelect
+                    value={String(dayStartHour)}
+                    onChange={v=>setDayStartHour(Number(v))}
+                    options={[
+                      { value: '0', label: '00:00 — Midnight (Default)' },
+                      { value: '1', label: '01:00 AM' },
+                      { value: '2', label: '02:00 AM' },
+                      { value: '3', label: '03:00 AM' },
+                      { value: '4', label: '04:00 AM' },
+                      { value: '5', label: '05:00 AM' },
+                      { value: '6', label: '06:00 AM' },
+                    ]}
+                  />
+                </div>
+              </div>
+
+              <div className="setting-row">
+                <div>
+                  <h3>Week starts on</h3>
+                  <p>Choose the beginning of your tracking week.</p>
+                </div>
+                <div className="segmented">
+                  <LiquidGlass as="button" className={weekStartsOn==='monday'?'selected':''} onClick={()=>setWeekStartsOn('monday')} radius={999} bevelDepth={8} scale={18}>Monday</LiquidGlass>
+                  <LiquidGlass as="button" className={weekStartsOn==='sunday'?'selected':''} onClick={()=>setWeekStartsOn('sunday')} radius={999} bevelDepth={8} scale={18}>Sunday</LiquidGlass>
                 </div>
               </div>
 
@@ -1393,24 +2067,41 @@ export default function App() {
 
       {/* Immersive Fullscreen Overlay */}
       {isImmersive && (
-        <div className="immersive-overlay" role="dialog" aria-modal="true" aria-label="Immersive clock">
-          <header className="immersive-topbar">
+        <div
+          className={`immersive-overlay ${!immersiveControlsVisible ? 'controls-hidden' : ''}`}
+          role="dialog"
+          aria-modal="true"
+          aria-label="Immersive clock"
+          onClick={() => revealControls()}
+        >
+          <header className="immersive-topbar immersive-autohide">
             <div className="immersive-badges">
               <span className="immersive-badge">
-                {active ? (
+                {clockMode === 'focus' || activeFocus ? (
+                  <>
+                    <Target size={14}/>
+                    <span>
+                      {activeFocus
+                        ? `${activeFocus.currentPhase === 'focus' ? 'FOCUS' : activeFocus.currentPhase === 'short_break' ? 'SHORT BREAK' : 'LONG BREAK'} · CYCLE ${activeFocus.currentCycle}/${activeFocus.config.totalCycles}`
+                        : 'FOCUS SESSION'}
+                    </span>
+                  </>
+                ) : active ? (
                   active.mode === 'stopwatch' ? <Clock3 size={14}/> : <Timer size={14}/>
                 ) : (
                   clockMode === 'stopwatch' ? <Clock3 size={14}/> : <Timer size={14}/>
                 )}
-                <span>
-                  {active ? active.mode.toUpperCase() : clockMode.toUpperCase()}
-                </span>
+                {clockMode !== 'focus' && !activeFocus && (
+                  <span>
+                    {active ? active.mode.toUpperCase() : clockMode.toUpperCase()}
+                  </span>
+                )}
               </span>
 
               {(() => {
-                const catId = active?.category || selectedCategory
+                const catId = activeFocus?.category || active?.category || selectedCategory
                 const cat = categories.find(c => c.id === catId)
-                const sub = active?.subcategory || selectedSub
+                const sub = activeFocus?.subcategory || active?.subcategory || selectedSub
                 if (!cat) return null
                 return (
                   <span className="immersive-badge">
@@ -1438,7 +2129,7 @@ export default function App() {
 
           <main className="immersive-center">
             <div className="immersive-ring-container">
-              {((active?.mode === 'timer') || (!active && clockMode === 'timer')) && (
+              {((active?.mode === 'timer') || (!active && clockMode === 'timer') || (clockMode === 'focus')) && (
                 <svg className="immersive-progress-svg" viewBox="0 0 460 460" aria-hidden="true">
                   <circle className="immersive-ring-track" cx="230" cy="230" r="210" />
                   <circle
@@ -1449,9 +2140,13 @@ export default function App() {
                     strokeDasharray={1319.47}
                     strokeDashoffset={
                       1319.47 * (1 - (
-                        active?.duration
-                          ? Math.min(1, Math.max(0, elapsed / active.duration))
-                          : 1
+                        clockMode === 'focus'
+                          ? (activeFocus
+                              ? Math.min(1, Math.max(0, getPhaseRemainingTime(activeFocus, now) / Math.max(1, activeFocus.phaseDuration)))
+                              : 1)
+                          : (active?.duration
+                              ? Math.min(1, Math.max(0, elapsed / active.duration))
+                              : 1)
                       ))
                     }
                   />
@@ -1459,8 +2154,15 @@ export default function App() {
               )}
 
               <div className="immersive-clock-content">
-                <div className={`immersive-status ${completedTimer && !active ? 'overdue' : ''}`}>
-                  {active ? (
+                <div className={`immersive-status ${completedTimer && !active && clockMode !== 'focus' ? 'overdue' : ''}`}>
+                  {clockMode === 'focus' ? (
+                    activeFocus ? (
+                      activeFocus.status === 'completed' ? 'FOCUS SESSION COMPLETE' :
+                      activeFocus.status === 'paused' ? 'PAUSED' :
+                      activeFocus.currentPhase === 'focus' ? 'FOCUS IN PROGRESS' :
+                      activeFocus.currentPhase === 'short_break' ? 'SHORT BREAK TIME' : 'LONG BREAK TIME'
+                    ) : 'READY TO FOCUS'
+                  ) : active ? (
                     active.status === 'running' ? 'IN PROGRESS' : 'PAUSED'
                   ) : completedTimer ? (
                     `${Math.max(1, Math.round(completedTimer.duration / 60))} MIN TIMER OVER`
@@ -1472,7 +2174,13 @@ export default function App() {
                 </div>
 
                 <div className={`immersive-digits clock-style-${clockStyle}`}>
-                  {active ? (
+                  {clockMode === 'focus' ? (
+                    activeFocus ? (
+                      fmt(getPhaseRemainingTime(activeFocus, now))
+                    ) : (
+                      fmt(Math.max(0, focusConfig.focusDuration * 60))
+                    )
+                  ) : active ? (
                     active.mode === 'stopwatch' ? fmtHms(elapsed) : fmt(elapsed)
                   ) : completedTimer ? (
                     `-${fmt(Math.max(0, Math.floor((now - completedTimer.finishedAt) / 1000)))}`
@@ -1485,8 +2193,79 @@ export default function App() {
               </div>
             </div>
 
-            <div className="immersive-controls">
-              {!active ? (
+            <div className="immersive-controls immersive-autohide">
+              {clockMode === 'focus' ? (
+                !activeFocus ? (
+                  <LiquidGlass
+                    as="button"
+                    className="primary-btn clock-start"
+                    onClick={startFocus}
+                    radius={999}
+                    bevelDepth={12}
+                    scale={32}
+                  >
+                    <Play size={17} fill="currentColor"/> Start focus session
+                  </LiquidGlass>
+                ) : activeFocus.status === 'completed' ? (
+                  <LiquidGlass
+                    as="button"
+                    className="primary-btn"
+                    onClick={resetFocusToSetup}
+                    radius={999}
+                    bevelDepth={12}
+                    scale={24}
+                  >
+                    <Check size={16}/> Back to setup
+                  </LiquidGlass>
+                ) : (
+                  <>
+                    <LiquidGlass
+                      as="button"
+                      className="primary-btn clock-start"
+                      onClick={activeFocus.status === 'running' ? pauseFocus : resumeFocus}
+                      radius={999}
+                      bevelDepth={12}
+                      scale={32}
+                    >
+                      {activeFocus.status === 'running' ? <Pause size={17}/> : <Play size={17}/>}
+                      {activeFocus.status === 'running' ? 'Pause' : 'Resume'}
+                    </LiquidGlass>
+                    {(activeFocus.currentPhase === 'short_break' || activeFocus.currentPhase === 'long_break') && (
+                      <LiquidGlass
+                        as="button"
+                        className="soft-btn"
+                        onClick={skipActiveBreak}
+                        radius={999}
+                        bevelDepth={10}
+                        scale={22}
+                      >
+                        <FastForward size={16}/> Skip break
+                      </LiquidGlass>
+                    )}
+                    <LiquidGlass
+                      as="button"
+                      className="soft-btn"
+                      onClick={finishFocusSession}
+                      radius={999}
+                      bevelDepth={10}
+                      scale={22}
+                    >
+                      <Check size={16}/> End session
+                    </LiquidGlass>
+                    <LiquidGlass
+                      as="button"
+                      className="round-btn"
+                      onClick={discardFocusSession}
+                      title="Discard session"
+                      radius={999}
+                      bevelDepth={10}
+                      scale={22}
+                    >
+                      <RotateCcw size={16}/>
+                    </LiquidGlass>
+                  </>
+                )
+              ) : !active ? (
                 <LiquidGlass
                   as="button"
                   className="primary-btn clock-start"
@@ -1537,10 +2316,17 @@ export default function App() {
             </div>
           </main>
 
-          <footer className="immersive-hints">
-            <span><kbd>Space</kbd> {!active ? 'Start' : active.status === 'running' ? 'Pause' : 'Resume'}</span>
+          <footer className="immersive-hints immersive-autohide">
+            <span><kbd>Space</kbd> {
+              clockMode === 'focus'
+                ? (!activeFocus ? 'Start' : activeFocus.status === 'running' ? 'Pause' : 'Resume')
+                : (!active ? 'Start' : active.status === 'running' ? 'Pause' : 'Resume')
+            }</span>
             <span><kbd>Esc</kbd> Exit full-screen</span>
-            {(!active || active.status === 'paused') && <span><kbd>R</kbd> Reset</span>}
+            {(
+              (clockMode === 'focus' && (!activeFocus || activeFocus.status === 'paused')) ||
+              (clockMode !== 'focus' && (!active || active.status === 'paused'))
+            ) && <span><kbd>R</kbd> {clockMode === 'focus' && activeFocus ? 'Discard' : 'Reset'}</span>}
           </footer>
         </div>
       )}
@@ -1636,11 +2422,17 @@ const Empty = memo(function Empty({text}:{text:string}){return <div className="e
 
 const SessionRow = memo(function SessionRow({session,categories,editable=false,onDelete}:{session:Session;categories:Category[];editable?:boolean;onDelete?:()=>void}){
   const cat=categories.find(c=>c.id===session.category)
+  const isBreak = isSessionBreak(session, categories)
+  const dotColor = isBreak ? '#34D399' : (cat?.color || 'var(--accent-primary)')
+  const title = isBreak
+    ? `Break${session.subcategory && session.subcategory !== 'Break' ? ` · ${session.subcategory}` : ''}`
+    : `${cat?.name||'Uncategorized'}${session.subcategory?` · ${session.subcategory}`:''}`
+
   return (
     <div className="session-row">
-      <div className="session-dot" style={{background:cat?.color||'var(--accent-primary)'}}/>
+      <div className="session-dot" style={{background: dotColor}}/>
       <div className="session-info">
-        <b>{cat?.name||'Uncategorized'}{session.subcategory?` · ${session.subcategory}`:''}</b>
+        <b>{title}</b>
         <span>{prettyDate(session.start)} · {timeLabel(session.start)} – {timeLabel(session.end)}</span>
         {session.notes && <span className="session-notes">“{session.notes}”</span>}
       </div>
@@ -1650,31 +2442,25 @@ const SessionRow = memo(function SessionRow({session,categories,editable=false,o
   )
 })
 
-const HourlyChart = memo(function HourlyChart({sessions,now,large=false}:{sessions:Session[];now:number;large?:boolean}){
+const HourlyChart = memo(function HourlyChart({sessions,now,dayStartHour=0,large=false}:{sessions:Session[];now:number;dayStartHour?:number;large?:boolean}){
   const bars = useMemo(() => {
     const bins = new Array(16).fill(0);
-    const target = new Date(now);
-    const ty = target.getFullYear();
-    const tm = target.getMonth();
-    const td = target.getDate();
+    const range = getDayBoundaryRange(getTrackingDate(now, dayStartHour), dayStartHour);
+    const studySessions = sessions.filter(s => !isSessionBreak(s));
 
-    for (let i = 0; i < sessions.length; i++) {
-      const s = sessions[i];
-      const d = new Date(s.start);
-      const match = large || (
-        d.getFullYear() === ty &&
-        d.getMonth() === tm &&
-        d.getDate() === td
-      );
+    for (let i = 0; i < studySessions.length; i++) {
+      const s = studySessions[i];
+      const match = large || (getSessionDayOverlap(s, range.start, range.end) > 0);
       if (match) {
+        const d = new Date(s.start);
         const h = d.getHours();
         if (h >= 6 && h <= 21) {
-          bins[h - 6] += s.duration;
+          bins[h - 6] += large ? s.duration : getSessionDayOverlap(s, range.start, range.end);
         }
       }
     }
     return bins.map((total, i) => ({ hour: i + 6, total }));
-  }, [sessions, now, large]);
+  }, [sessions, now, dayStartHour, large]);
 
   const max = Math.max(1, ...bars.map(b => b.total));
   return (
@@ -1707,34 +2493,245 @@ const HourlyChart = memo(function HourlyChart({sessions,now,large=false}:{sessio
   );
 })
 
-const CalendarGrid = memo(function CalendarGrid({month,sessions}:{month:Date;sessions:Session[]}){
+const CalendarGrid = memo(function CalendarGrid({
+  month,
+  sessions,
+  categories,
+  dayStartHour = 0,
+  weekStartsOn = 'monday',
+}: {
+  month: Date
+  sessions: Session[]
+  categories: Category[]
+  dayStartHour?: number
+  weekStartsOn?: WeekStartPreference
+}) {
   const first = new Date(month.getFullYear(), month.getMonth(), 1);
-  const offset = (first.getDay() + 6) % 7;
+  const offset = weekStartsOn === 'sunday' ? first.getDay() : (first.getDay() + 6) % 7;
   const days = new Date(month.getFullYear(), month.getMonth() + 1, 0).getDate();
+  const weekdays = weekStartsOn === 'sunday' ? ['S','M','T','W','T','F','S'] : ['M','T','W','T','F','S','S'];
 
   const totals = useMemo(() => {
-    const map = new Map<number, number>();
     const y = month.getFullYear();
     const m = month.getMonth();
-    for (let i = 0; i < sessions.length; i++) {
-      const s = sessions[i];
-      const d = new Date(s.start);
-      if (d.getFullYear() === y && d.getMonth() === m) {
-        const day = d.getDate();
-        map.set(day, (map.get(day) || 0) + s.duration);
-      }
-    }
-    return Array.from({ length: days }, (_, i) => map.get(i + 1) || 0);
-  }, [month, sessions, days]);
+    const studySessions = sessions.filter(s => !isSessionBreak(s, categories));
+    return Array.from({ length: days }, (_, i) => {
+      const dayNum = i + 1;
+      const range = getDayBoundaryRange(new Date(y, m, dayNum), dayStartHour);
+      return studySessions.reduce((acc, s) => acc + getSessionDayOverlap(s, range.start, range.end), 0);
+    });
+  }, [month, sessions, categories, days, dayStartHour]);
 
   const max = Math.max(1, ...totals);
+
+  const [hoveredDay, setHoveredDay] = useState<number | null>(null);
+  const [pinnedDay, setPinnedDay] = useState<number | null>(null);
+  const [anchorRect, setAnchorRect] = useState<DOMRect | null>(null);
+  const popupRef = useRef<HTMLDivElement | null>(null);
+
+  const activeDay = pinnedDay ?? hoveredDay;
+
+  const handleDayEnter = (dayNum: number, el: HTMLElement) => {
+    if (pinnedDay !== null) return;
+    setHoveredDay(dayNum);
+    setAnchorRect(el.getBoundingClientRect());
+  };
+
+  const handleDayLeave = () => {
+    if (pinnedDay !== null) return;
+    setHoveredDay(null);
+    setAnchorRect(null);
+  };
+
+  const handleDayClick = (dayNum: number, el: HTMLElement) => {
+    if (pinnedDay === dayNum) {
+      setPinnedDay(null);
+      setHoveredDay(null);
+      setAnchorRect(null);
+    } else {
+      setPinnedDay(dayNum);
+      setHoveredDay(null);
+      setAnchorRect(el.getBoundingClientRect());
+    }
+  };
+
+  // Close popup on Escape
+  useEffect(() => {
+    if (!activeDay) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        setPinnedDay(null);
+        setHoveredDay(null);
+        setAnchorRect(null);
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [activeDay]);
+
+  // Close pinned popup on outside click
+  useEffect(() => {
+    if (pinnedDay === null) return;
+    const handleOutsideClick = (e: MouseEvent | TouchEvent) => {
+      if (popupRef.current && !popupRef.current.contains(e.target as Node)) {
+        setPinnedDay(null);
+        setHoveredDay(null);
+        setAnchorRect(null);
+      }
+    };
+    document.addEventListener('mousedown', handleOutsideClick, true);
+    document.addEventListener('touchstart', handleOutsideClick, true);
+    return () => {
+      document.removeEventListener('mousedown', handleOutsideClick, true);
+      document.removeEventListener('touchstart', handleOutsideClick, true);
+    };
+  }, [pinnedDay]);
+
+  // Update anchor position on scroll/resize
+  useEffect(() => {
+    if (!activeDay) return;
+    const updatePosition = () => {
+      const activeEl = document.querySelector(`[data-day-cell="${activeDay}"]`);
+      if (activeEl) {
+        setAnchorRect(activeEl.getBoundingClientRect());
+      }
+    };
+    window.addEventListener('resize', updatePosition);
+    window.addEventListener('scroll', updatePosition, true);
+    return () => {
+      window.removeEventListener('resize', updatePosition);
+      window.removeEventListener('scroll', updatePosition, true);
+    };
+  }, [activeDay]);
+
+  const popupPosition = useMemo(() => {
+    if (!anchorRect) return null;
+    const width = 260;
+    const height = popupRef.current?.offsetHeight || 180;
+    const pad = 12;
+
+    let left = anchorRect.left + (anchorRect.width / 2) - (width / 2);
+    if (left < pad) left = pad;
+    if (left + width > window.innerWidth - pad) {
+      left = Math.max(pad, window.innerWidth - width - pad);
+    }
+
+    let top = anchorRect.top - height - 10;
+    if (top < pad) {
+      top = anchorRect.bottom + 10;
+    }
+    if (top + height > window.innerHeight - pad) {
+      top = Math.max(pad, window.innerHeight - height - pad);
+    }
+
+    return { top: Math.round(top), left: Math.round(left) };
+  }, [anchorRect]);
+
+  const dayDetails = useMemo(() => {
+    if (!activeDay) return null;
+    return getCalendarDayDetails({
+      year: month.getFullYear(),
+      month: month.getMonth(),
+      day: activeDay,
+      dayStartHour,
+      sessions,
+      categories,
+    });
+  }, [activeDay, month, dayStartHour, sessions, categories]);
+
   return (
     <div className="calendar-grid">
-      <div className="weekdays">{['M','T','W','T','F','S','S'].map((d,i)=><span key={i}>{d}</span>)}</div>
+      <div className="weekdays">{weekdays.map((d,i)=><span key={i}>{d}</span>)}</div>
       <div className="days">
         {Array.from({length:offset},(_,i)=><span className="day blank" key={`b${i}`}/>)}
-        {totals.map((t,i)=><span key={i} className={`day ${t?'has-time':''}`} style={{background:t?`rgba(var(--accent-rgb),${0.18+0.72*t/max})`:undefined, color:t&&t/max>0.45?'#ffffff':undefined}} title={`${i+1}: ${durationLabel(t)}`}>{i+1}</span>)}
+        {totals.map((t,i)=>{
+          const dayNum = i + 1;
+          const isSelected = activeDay === dayNum;
+          return (
+            <span
+              key={i}
+              data-day-cell={dayNum}
+              className={`day ${t ? 'has-time' : ''} ${isSelected ? 'active-day' : ''}`}
+              style={{
+                background: t ? `rgba(var(--accent-rgb),${0.18 + 0.72 * t / max})` : undefined,
+                color: t && t / max > 0.45 ? '#ffffff' : undefined,
+                cursor: 'pointer',
+              }}
+              onMouseEnter={e => handleDayEnter(dayNum, e.currentTarget)}
+              onMouseLeave={handleDayLeave}
+              onClick={e => handleDayClick(dayNum, e.currentTarget)}
+              title={`${dayNum}: ${durationLabel(t)}`}
+            >
+              {dayNum}
+            </span>
+          );
+        })}
       </div>
+
+      {dayDetails && popupPosition && createPortal(
+        <>
+          {pinnedDay !== null && (
+            <div
+              className="calendar-popup-backdrop"
+              onClick={() => {
+                setPinnedDay(null);
+                setHoveredDay(null);
+                setAnchorRect(null);
+              }}
+              aria-hidden="true"
+            />
+          )}
+          <LiquidGlass
+            ref={popupRef as any}
+            className={`calendar-date-popup ${pinnedDay !== null ? 'interactive' : ''}`}
+            radius={16}
+            bevelDepth={10}
+            scale={28}
+            aberration={2}
+            frost={0.3}
+            style={{
+              top: `${popupPosition.top}px`,
+              left: `${popupPosition.left}px`,
+            }}
+          >
+            <div className="cal-popup-date">{dayDetails.fullDate}</div>
+            <div className="cal-popup-stats">
+              <div><span>Total tracked:</span> <b>{formatDurationHuman(dayDetails.totalTracked)}</b></div>
+              <div><span>Study time:</span> <b>{formatDurationHuman(dayDetails.studyTime)}</b></div>
+              <div><span>Sessions:</span> <b>{dayDetails.sessionCount}</b></div>
+            </div>
+            {dayDetails.categoryBreakdown.length > 0 ? (
+              <div className="cal-popup-breakdown">
+                <div className="cal-popup-breakdown-title">Category breakdown</div>
+                {dayDetails.categoryBreakdown.map(cat => (
+                  <div key={cat.id} className="cal-popup-cat-row">
+                    <div className="cal-popup-cat-header">
+                      <span className="cat-label">
+                        <i className="cat-dot" style={{ background: cat.color }} />
+                        {cat.name}
+                      </span>
+                      <b>{formatDurationHuman(cat.duration)}</b>
+                    </div>
+                    {cat.subcategories.length > 0 && (
+                      <div className="cal-popup-subs">
+                        {cat.subcategories.map(sub => (
+                          <div key={sub.name} className="cal-popup-sub-row">
+                            <span>{sub.name}</span>
+                            <span>{formatDurationHuman(sub.duration)}</span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="cal-popup-empty">No activity recorded for this day</div>
+            )}
+          </LiquidGlass>
+        </>,
+        document.body
+      )}
     </div>
   );
 })
