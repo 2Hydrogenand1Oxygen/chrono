@@ -1393,9 +1393,18 @@ export default function App() {
 
               <section className="unified-clock-card">
                 <div className="mode-switch" role="tablist" aria-label="Clock mode">
-                  <LiquidGlass as="button" role="tab" aria-selected={clockMode==='stopwatch'} className={clockMode==='stopwatch'?'selected':''} disabled={!!active || (activeFocus !== null && activeFocus.status === 'running')} onClick={()=>setClockMode('stopwatch')} radius={999} bevelDepth={8} scale={20}><Clock3 size={16}/> Stopwatch</LiquidGlass>
-                  <LiquidGlass as="button" role="tab" aria-selected={clockMode==='timer'} className={clockMode==='timer'?'selected':''} disabled={!!active || (activeFocus !== null && activeFocus.status === 'running')} onClick={()=>setClockMode('timer')} radius={999} bevelDepth={8} scale={20}><Timer size={16}/> Timer</LiquidGlass>
-                  <LiquidGlass as="button" role="tab" aria-selected={clockMode==='focus'} className={clockMode==='focus'?'selected':''} disabled={!!active || (activeFocus !== null && activeFocus.status === 'running')} onClick={()=>setClockMode('focus')} radius={999} bevelDepth={8} scale={20}><Target size={16}/> Focus Session</LiquidGlass>
+                  <LiquidGlass as="button" role="tab" aria-selected={clockMode==='stopwatch'} className={clockMode==='stopwatch'?'selected':''} disabled={!!active || (activeFocus !== null && activeFocus.status === 'running')} onClick={()=>setClockMode('stopwatch')} radius={999} bevelDepth={8} scale={20}>
+                    <Clock3 size={16}/>
+                    <span>Stopwatch</span>
+                  </LiquidGlass>
+                  <LiquidGlass as="button" role="tab" aria-selected={clockMode==='timer'} className={clockMode==='timer'?'selected':''} disabled={!!active || (activeFocus !== null && activeFocus.status === 'running')} onClick={()=>setClockMode('timer')} radius={999} bevelDepth={8} scale={20}>
+                    <Timer size={16}/>
+                    <span>Timer</span>
+                  </LiquidGlass>
+                  <LiquidGlass as="button" role="tab" aria-selected={clockMode==='focus'} className={clockMode==='focus'?'selected':''} disabled={!!active || (activeFocus !== null && activeFocus.status === 'running')} onClick={()=>setClockMode('focus')} radius={999} bevelDepth={8} scale={20}>
+                    <Target size={16}/>
+                    <span>Focus Session</span>
+                  </LiquidGlass>
                 </div>
 
                 {clockMode === 'focus' ? (

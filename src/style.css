@@ -1130,9 +1130,11 @@ button:disabled {
   padding-bottom: 60px;
 }
 
-/* Segmented Mode Switcher (Stopwatch / Timer) */
+/* Segmented Mode Switcher (Stopwatch / Timer / Focus Session) */
 .mode-switch {
   display: inline-flex;
+  align-items: center;
+  justify-content: center;
   gap: 4px;
   padding: 4px;
   border-radius: var(--radius-pill);
@@ -1143,32 +1145,55 @@ button:disabled {
   -webkit-backdrop-filter: var(--blur-glass);
 }
 
-.mode-switch button {
+.mode-switch button,
+.mode-switch .lg-host {
   border: 1px solid transparent;
   border-radius: var(--radius-pill);
   background: transparent;
   color: var(--btn-glass-text-secondary);
   height: 36px;
-  padding: 0 20px;
-  display: flex;
+  padding: 0 16px;
+  display: inline-flex;
   align-items: center;
+  justify-content: center;
   gap: 8px;
   font-size: 12px;
   font-weight: 600;
+  line-height: 1;
+  text-align: center;
+  white-space: nowrap;
+  flex: 1 1 0;
+  min-width: 140px;
+  box-sizing: border-box;
   transition: all var(--transition-normal);
 }
 
-.mode-switch button:hover:not(.selected) {
+.mode-switch button svg,
+.mode-switch .lg-host svg {
+  flex-shrink: 0;
+  display: block;
+}
+
+.mode-switch button span,
+.mode-switch .lg-host span:not(.lg-filter-node) {
+  display: inline-flex;
+  align-items: center;
+  line-height: 1;
+}
+
+.mode-switch button:hover:not(.selected),
+.mode-switch .lg-host:hover:not(.selected) {
   color: var(--btn-glass-text);
   background: var(--btn-glass-hover);
 }
 
-.mode-switch button.selected {
+.mode-switch button.selected,
+.mode-switch .lg-host.selected {
   background: var(--btn-glass-active);
   border-color: var(--btn-glass-border-active);
   color: var(--btn-glass-text);
   box-shadow: var(--btn-glass-shadow-hover), 0 0 16px var(--btn-glass-glow);
-  transform: translateY(-1px);
+  transform: none;
 }
 
 /* Digital Clock Numbers */
